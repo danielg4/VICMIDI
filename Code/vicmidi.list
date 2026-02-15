@@ -1191,54 +1191,70 @@
      67  a59f				   setupirq
      68  a59f		       78		      sei
      69  a5a0
-     70  a5a0							; Point to my interrupt vector
-     71  a5a0		       a9 b4		      lda	#<theirq
-     72  a5a2		       8d 14 03 	      sta	$0314
-     73  a5a5		       a9 a5		      lda	#>theirq
-     74  a5a7		       8d 15 03 	      sta	$0315
-     75  a5aa
-     76  a5aa							; Disable timer interrupts
-     77  a5aa
-     78  a5aa		       a9 60		      lda	#%01100000
-     79  a5ac		       8d 2e 91 	      sta	$912e	; disable and acknowledge interrupts
-     80  a5af		       8d 2d 91 	      sta	$912d
-     81  a5b2							;sta $911e	; disable NMIs (Restore key)
-     82  a5b2
-     83  a5b2		       58		      cli
-     84  a5b3		       60		      rts
-     85  a5b4
-     86  a5b4							; ----------------------------------------------------------------------------
-     87  a5b4							; The IRQ.
-     88  a5b4
-     89  a5b4				   theirq
-     90  a5b4							; Fetch the received byte
-     91  a5b4		       ad 00 9c 	      lda	UART_RXTX	;get data
-     92  a5b7		       a4 5c		      ldy	write_pointer
-     93  a5b9		       99 00 12 	      sta	buffer,y
-     94  a5bc		       e6 5c		      inc	write_pointer
-     95  a5be
-     96  a5be							; Clear the interrupt from the UART by reading the status register
-     97  a5be		       ad 02 9c 	      lda	UART_ISR
-     98  a5c1
-     99  a5c1		       4c 56 ff 	      jmp	$ff56	; Use this in place of rti because it restores the A,X,Y registers from the stack
-    100  a5c4							;jmp $eabf	; return to normal IRQ	(scans keyboard and stuff)
-    101  a5c4
-    102  a5c4
-    103  a5c4							; ----------------------------------------------------------------------------
-    104  a5c4							; Handle the RESTORE key
-    105  a5c4
-    106  a5c4				   RESTORE
-    107  a5c4		       4c c7 fe 	      jmp	$fec7	; Continue as if no cartridge installed
-    108  a5c7
-    109  a5c7
-    110  a5c7							; ----------------------------------------------------------------------------
-    111  a5c7							; Strings
-    112  a5c7
-    113  a5c7				   nouart
-    114  a5c7		       7f 7f 20 75*	      byte.b	127,127, " uart NOT FOUND! ", 127,127
-    115  a5dc		       00		      byte.b	0
-    116  a5dd
-    117  a5dd							; EOF!
+     70  a5a0					      ifnconst	USE_NMI
+     71  a5a0							; Point to my interrupt vector
+     72  a5a0		       a9 b4		      lda	#<theirq
+     73  a5a2		       8d 14 03 	      sta	$0314
+     74  a5a5		       a9 a5		      lda	#>theirq
+     75  a5a7		       8d 15 03 	      sta	$0315
+     76  a5aa				  -	      else
+     77  a5aa				  -	      lda	#<thenmi
+     78  a5aa				  -	      sta	$0318
+     79  a5aa				  -	      lda	#>thenmi
+     80  a5aa				  -	      sta	$0319
+     81  a5aa					      eif
+     82  a5aa
+     83  a5aa							; Disable timer interrupts
+     84  a5aa
+     85  a5aa		       a9 60		      lda	#%01100000
+     86  a5ac		       8d 2e 91 	      sta	$912e	; disable and acknowledge interrupts
+     87  a5af		       8d 2d 91 	      sta	$912d
+     88  a5b2							;sta $911e	; disable NMIs (Restore key)
+     89  a5b2
+     90  a5b2		       58		      cli
+     91  a5b3		       60		      rts
+     92  a5b4
+     93  a5b4							; ----------------------------------------------------------------------------
+     94  a5b4							; The IRQ.
+     95  a5b4
+     96  a5b4				   thenmi
+     97  a5b4				  -	      ifconst	USE_NMI
+     98  a5b4				  -	      pha
+     99  a5b4				  -	      txa
+    100  a5b4				  -	      pha
+    101  a5b4				  -	      tya
+    102  a5b4				  -	      pha
+    103  a5b4					      eif
+    104  a5b4
+    105  a5b4				   theirq
+    106  a5b4							; Fetch the received byte
+    107  a5b4		       ad 00 9c 	      lda	UART_RXTX	;get data
+    108  a5b7		       a4 5c		      ldy	write_pointer
+    109  a5b9		       99 00 12 	      sta	buffer,y
+    110  a5bc		       e6 5c		      inc	write_pointer
+    111  a5be
+    112  a5be							; Clear the interrupt from the UART by reading the status register
+    113  a5be		       ad 02 9c 	      lda	UART_ISR
+    114  a5c1
+    115  a5c1		       4c 56 ff 	      jmp	$ff56	; Use this in place of rti because it restores the A,X,Y registers from the stack
+    116  a5c4							;jmp $eabf	; return to normal IRQ	(scans keyboard and stuff)
+    117  a5c4
+    118  a5c4
+    119  a5c4							; ----------------------------------------------------------------------------
+    120  a5c4							; Handle the RESTORE key
+    121  a5c4
+    122  a5c4				   RESTORE
+    123  a5c4		       4c c7 fe 	      jmp	$fec7	; Continue as if no cartridge installed
+    124  a5c7
+    125  a5c7
+    126  a5c7							; ----------------------------------------------------------------------------
+    127  a5c7							; Strings
+    128  a5c7
+    129  a5c7				   nouart
+    130  a5c7		       7f 7f 20 75*	      byte.b	127,127, " uart NOT FOUND! ", 127,127
+    131  a5dc		       00		      byte.b	0
+    132  a5dd
+    133  a5dd							; EOF!
 ------- FILE vicmidi.asm
 ------- FILE utils.asm LEVEL 2 PASS 2
       0  a5dd					      include	"utils.asm"

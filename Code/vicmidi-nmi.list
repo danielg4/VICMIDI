@@ -1,0 +1,3586 @@
+------- FILE vicmidi.asm LEVEL 1 PASS 2
+      1  b2eb ????						; VIC-20 MIDI Interface
+      2  b2eb ????						; By David Viens and Leif Bloomquist, portions by
+      3  b2eb ????						; Michael Kircher and Viznut
+      4  b2eb ????
+      5  b2eb ????						; ----------------------------------------------------------------------------
+      6  b2eb ????
+      7  b2eb ????				      processor	6502	; VIC-20
+      8  b2eb ????
+      9  b2eb ????						; Assume no memory expansion.	 Compile as Cartridge ROM in Block 5.
+     10  a000					      org	$A000	; Block 5
+     11  a000
+     12  a000							; Macro and equate includes (must be at start)
+------- FILE macros.asm LEVEL 2 PASS 2
+      0  a000					      include	"macros.asm"
+      1  a000
+      2  a000							; ==============================================================
+      3  a000							; Macro wrapping the fast hex poke
+      4  a000							; ==============================================================
+      5  a000
+      6  a000					      MAC	hexpoke
+      7  a000					      lda	#<{1}	; Low byte
+      8  a000					      sta	$22
+      9  a000					      lda	#>{1}	; High byte
+     10  a000					      sta	$23
+     11  a000
+     12  a000					      lda	{2}	; Note - address
+     13  a000					      jsr	hexstr
+     14  a000					      ENDM
+     15  a000
+     16  a000							; ==============================================================
+     17  a000							; Macro to position the cursor
+     18  a000							; ==============================================================
+     19  a000
+     20  a000					      MAC	plot
+     21  a000					      ldy	#{1}
+     22  a000					      ldx	#{2}
+     23  a000					      clc
+     24  a000					      jsr	$E50A	; PLOT - same on 64 and VIC
+     25  a000					      ENDM
+     26  a000
+     27  a000							; ==============================================================
+     28  a000							; Macro to print a string
+     29  a000							; ==============================================================
+     30  a000
+     31  a000					      MAC	printstring
+     32  a000					      ldy	#>{0}
+     33  a000					      lda	#<{0}
+     34  a000					      jsr	STROUT
+     35  a000					      ENDM
+     36  a000
+     37  a000							; ==============================================================
+     38  a000							; Macro to print a byte (Hex)
+     39  a000							; ==============================================================
+     40  a000
+     41  a000					      MAC	printbyte
+     42  a000					      ldx	#$00
+     43  a000					      ldy	#$0F
+     44  a000					      lda	{0}
+     45  a000					      jsr	printnum
+     46  a000					      ENDM
+------- FILE vicmidi.asm
+------- FILE equates.asm LEVEL 2 PASS 2
+      0  a000					      include	"equates.asm"
+      1  a000							; --------------------------------------------------------------------------------------------------
+      2  a000							;;free zero page (to use as vars)
+      3  a000							;INDEX1: $0022-$0023, First utility pointer		       used by HEXPOKE
+      4  a000							;INDEX2: $0024-$0025, Second utility pointer		       bytesexpected, midicounter
+      5  a000							;FORNAM: $0049-$004A, Pointer to FOR/NEXT index variable etc  channel
+      6  a000							;TEMPF3: $004E-$0052, Temporary FLPT storage		       Used by keyboard routines
+      7  a000							;TEMPF1: $0057-$005B, Temporary FLPT storage		       Used by setwave
+      8  a000							;TEMPF2: $005C-$0060: Temporary FLPT storage		       FIFO pointers
+      9  a000							;FAC:	  $0061-$0066, Floating-point Accumulator (FAC)        Flags for Poly mode
+     10  a000							;AFAC:   $0069-$006E, Alternative/Auxilary FAC 	       69=last note
+     11  a000
+     12  a000							; ---- Zero Page Addresses -------------------------------------------------
+     13  a000
+     14  a000		       00 24	   midicounter =	$24
+     15  a000		       00 25	   bytesexpected =	$25
+     16  a000
+     17  a000		       00 49	   channel    =	$49
+     18  a000		       00 4a	   bank       =	$4A	; 0=NTSC Normal, 1=PAL Normal, 2=NTSC Alt., 3=PAL Alt.
+     19  a000
+     20  a000							; Previous keyboard column bits.
+     21  a000		       00 4e	   c0	      =	$4E	; 2,4,6,8,(...)
+     22  a000		       00 4f	   c1	      =	$4F	; q,e,t,u,(...)
+     23  a000		       00 50	   c2	      =	$50	; w,r,y,i,p,(...)
+     24  a000		       00 51	   c3	      =	$51	; 1,3,5,7,(...)
+     25  a000
+     26  a000							; Used by setwave
+     27  a000		       00 57	   TMP	      =	$57
+     28  a000		       00 58	   TMP2       =	$58
+     29  a000
+     30  a000		       00 5c	   write_pointer =	$5C	; FIFO current write pointer - incremented on byte received
+     31  a000		       00 5d	   read_pointer =	$5D	; FIFO current read pointer  - incremented on byte removed
+     32  a000
+     33  a000		       00 5e	   currentvalue =	$5E	; Current value for voice settings
+     34  a000
+     35  a000		       00 61	   poly_flags =	$61	; Flags for polymode
+     36  a000							; Also 62,63,64
+     37  a000
+     38  a000		       00 68	   lastnote   =	$68	; Remembers last note, so Note Off applies to that note only
+     39  a000							; Also 69,6A,6B
+     40  a000
+     41  a000		       00 6c	   temp1      =	$6C	; Used for screen colors
+     42  a000		       00 6d	   tempx      =	$6D	; Used by program change
+     43  a000
+     44  a000							;*00FB-00FE  251-254  Operating system free zero page space
+     45  a000		       00 fb	   statusbyte =	$FB
+     46  a000		       00 fc	   mididata0  =	$FC
+     47  a000		       00 fd	   mididata1  =	$FD
+     48  a000		       00 fe	   mididata2  =	$FE	; If needed
+     49  a000
+     50  a000							; ---- Non Zero Page Addresses -----------------------------------------------
+     51  a000
+     52  a000							; Store viznut waveform being used per voice  (located near start of BASIC space)
+     53  a000		       10 10	   waveform1  =	$1010
+     54  a000		       10 11	   waveform2  =	$1011
+     55  a000		       10 12	   waveform3  =	$1012
+     56  a000		       10 13	   waveform4  =	$1013
+     57  a000
+     58  a000		       10 14	   tempstatusbyte =	$1014
+     59  a000		       10 15	   command    =	$1015
+     60  a000
+     61  a000							; Scratch space for setwave parameters
+     62  a000		       10 20	   setwavechannel =	$1020	; y = channel ($0a..$0c)
+     63  a000		       10 21	   setwavefrequency =	$1021	; x = initial frequency
+     64  a000		       10 22	   setwaveshiftreg =	$1022	; a = shift register contents
+     65  a000
+     66  a000							; Used by MIDI Out
+     67  a000		       10 23	   midinoteout =	$1023
+     68  a000
+     69  a000							; Setwave Target
+     70  a000		       11 00	   setwave    =	$1100	; Setwave code has to all be on one page.
+     71  a000
+     72  a000							; Input Buffer
+     73  a000		       12 00	   buffer     =	$1200
+     74  a000
+     75  a000							; Font (copied here from ROM)
+     76  a000		       18 00	   font       =	$1800	; 6144 decimal
+     77  a000
+     78  a000							;Screen locations
+     79  a000		       1e 00	   screen_start =	$1E00
+     80  a000		       1e 4d	   midi_display =	$1E4D
+     81  a000		       1e 77	   voice_display =	$1E77
+     82  a000		       1f f9	   spin_display =	$1FF9	; Lower-right corner
+     83  a000		       97 f9	   spin_color =	spin_display + $7800
+     84  a000
+     85  a000							;Sound and Video Registers
+     86  a000		       90 0a	   sound_voice1 =	$900A	; Frequency for oscillator 1 (low)    (on: 128-255)
+     87  a000		       90 0b	   sound_voice2 =	$900B	; Frequency for oscillator 2 (medium) (on: 128-255)
+     88  a000		       90 0c	   sound_voice3 =	$900C	; Frequency for oscillator 3 (high)   (on: 128-255)
+     89  a000		       90 0d	   sound_noise =	$900D	; Frequency of noise source	       (on: 128-255)
+     90  a000		       90 0e	   sound_volume =	$900E	; Bits 0-3 sets volume of all sound.  Bits 4-7 are auxiliary color information (not used)
+     91  a000		       90 0f	   screen_colors =	$900F
+     92  a000
+     93  a000							; ST16C450 Registers  (IO3)
+     94  a000		       9c 00	   UART_RXTX  =	$9C00
+     95  a000		       9c 01	   UART_IER   =	$9C01
+     96  a000		       9c 02	   UART_ISR   =	$9C02
+     97  a000		       9c 03	   UART_LCR   =	$9C03
+     98  a000		       9c 04	   UART_MCR   =	$9C04
+     99  a000		       9c 05	   UART_LSR   =	$9C05
+    100  a000		       9c 07	   UART_SCRATCHPAD =	$9C07
+    101  a000		       9c 00	   UART_DIVISOR_LSB =	$9C00	; Yes, same as UART_RXTX
+    102  a000		       9c 01	   UART_DIVISOR_MSB =	$9C01
+    103  a000
+    104  a000
+    105  a000							; Kernal/BASIC Routines
+    106  a000		       e5 5f	   CLRSCREEN  =	$E55F
+    107  a000		       e5 81	   HOME       =	$E581
+    108  a000		       eb 1e	   ISCNKY     =	$EB1E
+    109  a000		       f2 7a	   CHROUT     =	$F27A
+    110  a000		       ff e4	   GETIN      =	$FFE4
+    111  a000		       cb 1e	   STROUT     =	$CB1E	; Print string pointed to by (A/Y) until zero byte.
+    112  a000
+    113  a000		       00 08	   CG_DCS     =	8	;disable shift+C=
+    114  a000		       00 09	   CG_ECS     =	9	;enable shift+C=
+    115  a000
+    116  a000		       00 0e	   CG_LCS     =	14	;switch to lowercase
+    117  a000		       00 8e	   CG_UCS     =	142	;switch to uppercase
+    118  a000
+    119  a000							;cursor movement
+    120  a000		       00 13	   CS_HOM     =	19
+    121  a000		       00 91	   CS_U       =	145
+    122  a000		       00 11	   CS_D       =	17
+    123  a000		       00 9d	   CS_L       =	157
+    124  a000		       00 1d	   CS_R       =	29
+    125  a000
+    126  a000		       00 0d	   CRLF       =	13
+    127  a000
+    128  a000							; EOF!
+------- FILE vicmidi.asm
+     15  a000
+     16  a000							; ---- Startup Code ---------------------------------------------------------
+     17  a000		       09 a0		      dc.w	START	; Entry point for power up
+     18  a002		       c9 a5		      dc.w	RESTORE	; Entry point for warm start (RESTORE)
+     19  a004
+     20  a004		       41 30 c3 c2*	      dc.b	"A0",$C3,$C2,$CD	; 'A0CBM' boot string
+     21  a009
+     22  a009				   START
+     23  a009							; Kernel Init
+     24  a009		       20 8d fd 	      jsr	$fd8d	; RAMTAS - Initialise System Constants
+     25  a00c		       20 52 fd 	      jsr	$fd52	; Init Vectors
+     26  a00f		       20 f9 fd 	      jsr	$fdf9	; Init I/O
+     27  a012		       20 18 e5 	      jsr	$e518	; Init I/O
+     28  a015
+     29  a015							; BASIC Init (Partial)
+     30  a015		       20 5b e4 	      jsr	$e45b	; Init Vectors
+     31  a018		       20 a4 e3 	      jsr	$e3a4	; BASIC RAM
+     32  a01b		       20 04 e4 	      jsr	$e404	; INIT Message (needed (?) so keycheck routines work)
+     33  a01e
+     34  a01e				   entry
+     35  a01e		       20 c4 a3 	      jsr	setupfont
+     36  a021		       20 89 a3 	      jsr	mainscreen
+     37  a024		       20 2e a6 	      jsr	setup_pal
+     38  a027		       20 b8 a3 	      jsr	setwavecopy
+     39  a02a		       20 57 a5 	      jsr	checkuart
+     40  a02d		       20 9f a5 	      jsr	setupirq
+     41  a030		       20 80 a5 	      jsr	resetuart
+     42  a033
+     43  a033							; Default to maximum volume
+     44  a033		       a9 0f		      lda	#$0F
+     45  a035		       20 69 a2 	      jsr	setvolume
+     46  a038
+     47  a038							; Initial Values
+     48  a038		       a9 00		      lda	#$00
+     49  a03a		       85 24		      sta	midicounter	; midicounter=0
+     50  a03c		       85 fb		      sta	statusbyte	; statusbyte=0
+     51  a03e		       85 fc		      sta	mididata0	; mididata0=0
+     52  a040		       85 fd		      sta	mididata1	; mididata1=0
+     53  a042		       85 fe		      sta	mididata2	; mididata2=0
+     54  a044		       85 4e		      sta	c0	; no keys are pressed in 7F
+     55  a046		       85 4f		      sta	c1	; no keys are pressed in BF
+     56  a048		       85 50		      sta	c2	; no keys are pressed in FD
+     57  a04a		       85 51		      sta	c3	; no keys are pressed in FE
+     58  a04c		       85 68		      sta	lastnote+0	; Clear
+     59  a04e		       85 69		      sta	lastnote+1	;    last
+     60  a050		       85 6a		      sta	lastnote+2	;	note
+     61  a052		       85 6b		      sta	lastnote+3	;	  (including noise)
+     62  a054		       85 61		      sta	poly_flags+0	; Clear
+     63  a056		       85 62		      sta	poly_flags+1	;   poly
+     64  a058		       85 63		      sta	poly_flags+2	;     flags
+     65  a05a		       8d f9 97 	      sta	spin_color
+     66  a05d		       85 5c		      sta	write_pointer
+     67  a05f		       85 5d		      sta	read_pointer
+     68  a061		       8d 10 10 	      sta	waveform1
+     69  a064		       8d 11 10 	      sta	waveform2
+     70  a067		       8d 12 10 	      sta	waveform3
+     71  a06a		       8d 13 10 	      sta	waveform4
+     72  a06d		       8d 23 10 	      sta	midinoteout
+     73  a070
+     74  a070							;;; ==========================================================================
+     75  a070							;;; main LOOP!
+     76  a070				   loop
+     77  a070		       ee f9 97 	      inc	spin_color	; Prove we aren't 'frozen'
+     78  a073		       20 e8 a6 	      jsr	ReadKey	; create events from keyboard if needed
+     79  a076
+     80  a076		       a5 5d		      lda	read_pointer
+     81  a078		       c5 5c		      cmp	write_pointer
+     82  a07a		       f0 f4		      beq	loop	; Pointers match, no data
+     83  a07c							;;; ==========================================================================
+     84  a07c
+     85  a07c							; We have data!
+     86  a07c							; Advance pointer for next read
+     87  a07c		       e6 5d		      inc	read_pointer
+     88  a07e
+     89  a07e							; Read current byte
+     90  a07e		       aa		      tax		; Since A still contains the unincremented pointer
+     91  a07f		       bd 00 12 	      lda	buffer,x
+     92  a082
+     93  a082							; If Bit 7 is set, it means it's a status byte and we need to prepare for a new message
+     94  a082		       10 33		      bpl	data	; Not a status byte
+     95  a084
+     96  a084							; ----------------------------------------------------------------------------
+     97  a084							; Process a status byte  (Currently in A)
+     98  a084
+     99  a084							; Store the status byte temporarily
+    100  a084		       8d 14 10 	      sta	tempstatusbyte
+    101  a087
+    102  a087							; Handle System Common / System Realtime messages
+    103  a087		       29 f0		      and	#$F0
+    104  a089		       c9 f0		      cmp	#$F0
+    105  a08b		       d0 03		      bne	normalmessage
+    106  a08d							;  inc screen_colors
+    107  a08d		       4c 1e a1 	      jmp	system_realtime_proc	; Which goes back to loop
+    108  a090
+    109  a090				   normalmessage
+    110  a090							; Everything else, split into Command and Channel
+    111  a090		       ad 14 10 	      lda	tempstatusbyte
+    112  a093		       85 fb		      sta	statusbyte
+    113  a095		       29 f0		      and	#$F0	; Get the upper nybble
+    114  a097		       8d 15 10 	      sta	command
+    115  a09a
+    116  a09a		       a5 fb		      lda	statusbyte
+    117  a09c		       29 0f		      and	#$0F	; Get the lower nybble
+    118  a09e		       85 49		      sta	channel
+    119  a0a0
+    120  a0a0							; Also, check how many data bytes should follow.
+    121  a0a0		       ad 15 10 	      lda	command
+    122  a0a3
+    123  a0a3							; 1 for Program Change
+    124  a0a3		       c9 c0		      cmp	#$C0	; Program change
+    125  a0a5		       f0 05		      beq	bytes1
+    126  a0a7
+    127  a0a7							; Assume 2 for all the rest
+    128  a0a7				   bytes2
+    129  a0a7		       a0 02		      ldy	#$02
+    130  a0a9		       4c ae a0 	      jmp	setbytes
+    131  a0ac
+    132  a0ac				   bytes1
+    133  a0ac		       a0 01		      ldy	#$01
+    134  a0ae							; Drop through
+    135  a0ae
+    136  a0ae				   setbytes
+    137  a0ae		       84 25		      sty	bytesexpected
+    138  a0b0
+    139  a0b0							; Reset the midi counter to 0
+    140  a0b0		       a2 00		      ldx	#$00
+    141  a0b2		       86 24		      stx	midicounter
+    142  a0b4
+    143  a0b4		       4c 70 a0 	      jmp	loop	; Wait for next byte
+    144  a0b7
+    145  a0b7
+    146  a0b7							; ----------------------------------------------------------------------------
+    147  a0b7							; Store data byte - in A.
+    148  a0b7
+    149  a0b7				   data
+    150  a0b7		       a6 24		      ldx	midicounter	; What byte are we at?
+    151  a0b9		       95 fc		      sta	mididata0,x	; Store received midi data pointed by x
+    152  a0bb
+    153  a0bb		       e8		      inx		; x++
+    154  a0bc		       86 24		      stx	midicounter	; and store x
+    155  a0be
+    156  a0be		       e4 25		      cpx	bytesexpected	; Number of data bytes expected in this MIDI message (i.e. 2)
+    157  a0c0		       f0 03		      beq	messageproc	; Complete MIDI message received.
+    158  a0c2
+    159  a0c2							; Not complete, wait for more bytes.
+    160  a0c2		       4c 70 a0 	      jmp	loop
+    161  a0c5
+    162  a0c5
+    163  a0c5							; ----------------------------------------------------------------------------
+    164  a0c5							; Process a complete MIDI message   (All but System)
+    165  a0c5
+    166  a0c5				   messageproc
+    167  a0c5
+    168  a0c5							; Display received message bytes
+      0  a0c5					      HEXPOKE	(midi_display+0),statusbyte
+      1  a0c5		       a9 4d		      lda	#<(midi_display+0)
+      2  a0c7		       85 22		      sta	$22
+      3  a0c9		       a9 1e		      lda	#>(midi_display+0)
+      4  a0cb		       85 23		      sta	$23
+      5  a0cd
+      6  a0cd		       a5 fb		      lda	statusbyte
+      7  a0cf		       20 e2 a5 	      jsr	hexstr
+      0  a0d2					      HEXPOKE	(midi_display+3),mididata0
+      1  a0d2		       a9 50		      lda	#<(midi_display+3)
+      2  a0d4		       85 22		      sta	$22
+      3  a0d6		       a9 1e		      lda	#>(midi_display+3)
+      4  a0d8		       85 23		      sta	$23
+      5  a0da
+      6  a0da		       a5 fc		      lda	mididata0
+      7  a0dc		       20 e2 a5 	      jsr	hexstr
+      0  a0df					      HEXPOKE	(midi_display+6),mididata1
+      1  a0df		       a9 53		      lda	#<(midi_display+6)
+      2  a0e1		       85 22		      sta	$22
+      3  a0e3		       a9 1e		      lda	#>(midi_display+6)
+      4  a0e5		       85 23		      sta	$23
+      5  a0e7
+      6  a0e7		       a5 fd		      lda	mididata1
+      7  a0e9		       20 e2 a5 	      jsr	hexstr
+    172  a0ec
+    173  a0ec							; Reset the midi counter to 0 again, in case of running status
+    174  a0ec		       a2 00		      ldx	#$00
+    175  a0ee		       86 24		      stx	midicounter
+    176  a0f0
+    177  a0f0							; Determine Command
+    178  a0f0		       ad 15 10 	      lda	command
+    179  a0f3
+    180  a0f3		       c9 80		      cmp	#$80	; Note Off
+    181  a0f5		       f0 0f		      beq	donoteoff
+    182  a0f7
+    183  a0f7		       c9 90		      cmp	#$90	; Note On
+    184  a0f9		       f0 11		      beq	donoteon
+    185  a0fb
+    186  a0fb		       c9 b0		      cmp	#$B0	; Control Change
+    187  a0fd		       f0 13		      beq	docontrolchange
+    188  a0ff
+    189  a0ff		       c9 c0		      cmp	#$C0	; Program Change
+    190  a101		       f0 15		      beq	doprogramchange
+    191  a103
+    192  a103							; All others (Aftertouch, etc.) ignored.
+    193  a103		       4c 70 a0 	      jmp	loop
+    194  a106
+    195  a106				   donoteoff
+    196  a106		       20 e1 a1 	      jsr	noteoff
+    197  a109		       4c 70 a0 	      jmp	loop
+    198  a10c
+    199  a10c				   donoteon
+    200  a10c		       20 3d a1 	      jsr	noteon
+    201  a10f		       4c 70 a0 	      jmp	loop
+    202  a112
+    203  a112				   docontrolchange
+    204  a112		       20 fa a1 	      jsr	controlchange
+    205  a115		       4c 70 a0 	      jmp	loop
+    206  a118
+    207  a118				   doprogramchange
+    208  a118		       20 94 a2 	      jsr	programchange
+    209  a11b		       4c 70 a0 	      jmp	loop
+    210  a11e
+    211  a11e
+    212  a11e							; ----------------------------------------------------------------------------
+    213  a11e							; Process a MIDI System Realtime  (for future)
+    214  a11e
+    215  a11e				   system_realtime_proc
+    216  a11e
+    217  a11e							; Display received message bytes
+      0  a11e					      HEXPOKE	(midi_display+0),tempstatusbyte
+      1  a11e		       a9 4d		      lda	#<(midi_display+0)
+      2  a120		       85 22		      sta	$22
+      3  a122		       a9 1e		      lda	#>(midi_display+0)
+      4  a124		       85 23		      sta	$23
+      5  a126
+      6  a126		       ad 14 10 	      lda	tempstatusbyte
+      7  a129		       20 e2 a5 	      jsr	hexstr
+    219  a12c
+    220  a12c							; Blank the unused MIDI bytes
+    221  a12c		       a9 2d		      lda	#45	; -
+    222  a12e		       8d 50 1e 	      sta	midi_display+3
+    223  a131		       8d 51 1e 	      sta	midi_display+4
+    224  a134		       8d 53 1e 	      sta	midi_display+6
+    225  a137		       8d 54 1e 	      sta	midi_display+7
+    226  a13a
+    227  a13a							; inc screen_colors
+    228  a13a
+    229  a13a							; Determine Command
+    230  a13a							;lda tempstatusbyte
+    231  a13a
+    232  a13a							;cmp #$...
+    233  a13a							;beq ...
+    234  a13a
+    235  a13a							; All ignored.
+    236  a13a		       4c 70 a0 	      jmp	loop
+    237  a13d
+    238  a13d
+    239  a13d
+    240  a13d
+    241  a13d							;*****************************************************************************
+    242  a13d							;*************************  MIDI Processing  *********************************
+    243  a13d							;*****************************************************************************
+    244  a13d
+    245  a13d							; ---- Note On ---------------------------------------------------
+    246  a13d							; 9c nn vv
+    247  a13d
+    248  a13d				   noteon
+    249  a13d							; Special Case: Treat Velocity=0 as Note Off.	Velocity ignored otherwise.
+    250  a13d		       a5 fd		      lda	mididata1
+    251  a13f		       d0 03		      bne	noteon_contd
+    252  a141		       4c e1 a1 	      jmp	noteoff
+    253  a144
+    254  a144				   noteon_contd
+    255  a144		       a4 49		      ldy	channel	; Y now contains Channel # (0-offset)
+    256  a146		       a6 fc		      ldx	mididata0	; X now contains MIDI Note #
+    257  a148
+    258  a148							; Special Case: Channel 5 used for Poly mode
+    259  a148		       c0 04		      cpy	#$04
+    260  a14a		       d0 03		      bne	savenote
+    261  a14c		       20 43 a6 	      jsr	get_poly_voice
+    262  a14f
+    263  a14f				   savenote
+    264  a14f							; Save the note# so that later Note Offs only apply to this note.
+    265  a14f		       8a		      txa
+    266  a150		       99 68 00 	      sta	lastnote,y
+    267  a153
+    268  a153							; Perform a table lookup of MIDI Note# to VIC Register
+    269  a153							; Table to use depends on bank/voice/channel
+    270  a153
+    271  a153							; Check the bank
+    272  a153		       a5 4a		      lda	bank
+    273  a155
+    274  a155		       c9 00		      cmp	#$00
+    275  a157		       f0 0d		      beq	lookups_ntsc
+    276  a159
+    277  a159		       c9 01		      cmp	#$01
+    278  a15b		       f0 32		      beq	lookups_pal
+    279  a15d
+    280  a15d		       c9 02		      cmp	#$02
+    281  a15f		       f0 57		      beq	lookups_alt
+    282  a161
+    283  a161		       c9 03		      cmp	#$03
+    284  a163		       f0 53		      beq	lookups_alt
+    285  a165
+    286  a165							; Ignore all other banks
+    287  a165		       60		      rts
+    288  a166
+    289  a166
+    290  a166							; ------ NTSC -------
+    291  a166
+    292  a166				   lookups_ntsc
+    293  a166		       c0 00		      cpy	#$00
+    294  a168		       f0 0d		      beq	vlook1_ntsc
+    295  a16a
+    296  a16a		       c0 01		      cpy	#$01
+    297  a16c		       f0 0f		      beq	vlook2_ntsc
+    298  a16e
+    299  a16e		       c0 02		      cpy	#$02
+    300  a170		       f0 11		      beq	vlook3_ntsc
+    301  a172
+    302  a172		       c0 03		      cpy	#$03
+    303  a174		       f0 13		      beq	vlook4_ntsc
+    304  a176
+    305  a176							; Ignore all other channels
+    306  a176		       60		      rts
+    307  a177
+    308  a177				   vlook1_ntsc
+    309  a177		       bd eb a8 	      lda	voice1lookup_ntsc,x
+    310  a17a		       4c 1a a3 	      jmp	setvoice
+    311  a17d
+    312  a17d				   vlook2_ntsc
+    313  a17d		       bd 6b a9 	      lda	voice2lookup_ntsc,x
+    314  a180		       4c 1a a3 	      jmp	setvoice
+    315  a183
+    316  a183				   vlook3_ntsc
+    317  a183		       bd eb a9 	      lda	voice3lookup_ntsc,x
+    318  a186		       4c 1a a3 	      jmp	setvoice
+    319  a189
+    320  a189				   vlook4_ntsc
+    321  a189		       bd 6b aa 	      lda	voice4lookup_ntsc,x
+    322  a18c		       4c 1a a3 	      jmp	setvoice
+    323  a18f
+    324  a18f							; ------ PAL -------
+    325  a18f
+    326  a18f				   lookups_pal
+    327  a18f		       c0 00		      cpy	#$00
+    328  a191		       f0 0d		      beq	vlook1_pal
+    329  a193
+    330  a193		       c0 01		      cpy	#$01
+    331  a195		       f0 0f		      beq	vlook2_pal
+    332  a197
+    333  a197		       c0 02		      cpy	#$02
+    334  a199		       f0 11		      beq	vlook3_pal
+    335  a19b
+    336  a19b		       c0 03		      cpy	#$03
+    337  a19d		       f0 13		      beq	vlook4_pal
+    338  a19f
+    339  a19f							; Ignore all other channels
+    340  a19f		       60		      rts
+    341  a1a0
+    342  a1a0				   vlook1_pal
+    343  a1a0		       bd eb aa 	      lda	voice1lookup_pal,x
+    344  a1a3		       4c 1a a3 	      jmp	setvoice
+    345  a1a6
+    346  a1a6				   vlook2_pal
+    347  a1a6		       bd 6b ab 	      lda	voice2lookup_pal,x
+    348  a1a9		       4c 1a a3 	      jmp	setvoice
+    349  a1ac
+    350  a1ac				   vlook3_pal
+    351  a1ac		       bd eb ab 	      lda	voice3lookup_pal,x
+    352  a1af		       4c 1a a3 	      jmp	setvoice
+    353  a1b2
+    354  a1b2				   vlook4_pal
+    355  a1b2		       bd 6b ac 	      lda	voice4lookup_pal,x
+    356  a1b5		       4c 1a a3 	      jmp	setvoice
+    357  a1b8
+    358  a1b8							; ------ Alternate -------
+    359  a1b8
+    360  a1b8				   lookups_alt
+    361  a1b8		       c0 00		      cpy	#$00
+    362  a1ba		       f0 0d		      beq	vlook1_alt
+    363  a1bc
+    364  a1bc		       c0 01		      cpy	#$01
+    365  a1be		       f0 0f		      beq	vlook2_alt
+    366  a1c0
+    367  a1c0		       c0 02		      cpy	#$02
+    368  a1c2		       f0 11		      beq	vlook3_alt
+    369  a1c4
+    370  a1c4		       c0 03		      cpy	#$03
+    371  a1c6		       f0 13		      beq	vlook4_alt
+    372  a1c8
+    373  a1c8							; Ignore all other channels
+    374  a1c8		       60		      rts
+    375  a1c9
+    376  a1c9				   vlook1_alt
+    377  a1c9		       bd eb ac 	      lda	voice1lookup_alt,x
+    378  a1cc		       4c 1a a3 	      jmp	setvoice
+    379  a1cf
+    380  a1cf				   vlook2_alt
+    381  a1cf		       bd 6b ad 	      lda	voice2lookup_alt,x
+    382  a1d2		       4c 1a a3 	      jmp	setvoice
+    383  a1d5
+    384  a1d5				   vlook3_alt
+    385  a1d5		       bd eb ad 	      lda	voice3lookup_alt,x
+    386  a1d8		       4c 1a a3 	      jmp	setvoice
+    387  a1db
+    388  a1db				   vlook4_alt
+    389  a1db		       bd 6b ae 	      lda	voice4lookup_alt,x
+    390  a1de		       4c 1a a3 	      jmp	setvoice
+    391  a1e1
+    392  a1e1							; ---- Note Off --------------------------------------------------------------
+    393  a1e1							; 8c nn vv
+    394  a1e1
+    395  a1e1				   noteoff
+    396  a1e1		       a4 49		      ldy	channel	; Y now contains channel #
+    397  a1e3
+    398  a1e3							; Special Case: Channel 5 used for Poly mode
+    399  a1e3		       c0 04		      cpy	#$04
+    400  a1e5		       d0 06		      bne	noteoff_check
+    401  a1e7
+    402  a1e7		       20 58 a6 	      jsr	get_poly_voice_off
+    403  a1ea		       4c f4 a1 	      jmp	noteoff_off
+    404  a1ed
+    405  a1ed				   noteoff_check
+    406  a1ed							;For Channels 1-4
+    407  a1ed							;Check if it matches the last.  If not, ignore.
+    408  a1ed		       b9 68 00 	      lda	lastnote,y
+    409  a1f0		       c5 fc		      cmp	mididata0
+    410  a1f2		       d0 05		      bne	noteoff_x
+    411  a1f4
+    412  a1f4				   noteoff_off
+    413  a1f4		       a9 00		      lda	#$00	; Off
+    414  a1f6		       4c 1a a3 	      jmp	setvoice
+    415  a1f9
+    416  a1f9				   noteoff_x
+    417  a1f9		       60		      rts
+    418  a1fa
+    419  a1fa							; ---- Control Change --------------------------------------------------------
+    420  a1fa							; Bc CC vv
+    421  a1fa
+    422  a1fa				   controlchange
+    423  a1fa		       a4 49		      ldy	channel	; Y now contains channel #
+    424  a1fc		       a5 fc		      lda	mididata0	; Controller number
+    425  a1fe
+    426  a1fe		       c9 00		      cmp	#00	; Bank select - decimal
+    427  a200		       f0 15		      beq	bankselect
+    428  a202
+    429  a202		       c9 01		      cmp	#01	; Modulation Wheel (coarse) - decimal
+    430  a204		       f0 57		      beq	modwheel
+    431  a206
+    432  a206		       c9 07		      cmp	#07	; Volume (coarse) - decimal
+    433  a208		       f0 5a		      beq	volume
+    434  a20a
+    435  a20a		       c9 4a		      cmp	#74	; Brightness - decimal
+    436  a20c		       f0 6d		      beq	screencolors
+    437  a20e
+    438  a20e		       c9 78		      cmp	#120	; All Sound Off - decimal
+    439  a210		       f0 7d		      beq	soundoff
+    440  a212
+    441  a212		       c9 7b		      cmp	#123	; All Notes Off - decimal
+    442  a214		       f0 79		      beq	soundoff
+    443  a216
+    444  a216							; Ignore all the rest
+    445  a216		       60		      rts
+    446  a217
+    447  a217							; ---- Bank Select -----------------------------------------------------------
+    448  a217							; Bc 00 vv
+    449  a217
+    450  a217				   bankselect
+    451  a217		       a5 fd		      lda	mididata1
+    452  a219		       29 03		      and	#$03	; A contains bank, 0-3
+    453  a21b		       85 4a		      sta	bank
+    454  a21d
+    455  a21d				   showbank
+      0  a21d					      HEXPOKE	(voice_display+132),bank
+      1  a21d		       a9 fb		      lda	#<(voice_display+132)
+      2  a21f		       85 22		      sta	$22
+      3  a221		       a9 1e		      lda	#>(voice_display+132)
+      4  a223		       85 23		      sta	$23
+      5  a225
+      6  a225		       a5 4a		      lda	bank
+      7  a227		       20 e2 a5 	      jsr	hexstr
+    457  a22a
+      0  a22a					      PLOT	9,13
+      1  a22a		       a0 09		      ldy	#9
+      2  a22c		       a2 0d		      ldx	#13
+      3  a22e		       18		      clc
+      4  a22f		       20 0a e5 	      jsr	$E50A
+    459  a232
+    460  a232		       a5 4a		      lda	bank
+    461  a234
+    462  a234		       c9 00		      cmp	#$00
+    463  a236		       f0 0d		      beq	ntsc
+    464  a238
+    465  a238		       c9 01		      cmp	#$01
+    466  a23a		       f0 11		      beq	pal
+    467  a23c
+    468  a23c		       c9 02		      cmp	#$02
+    469  a23e		       f0 15		      beq	alt
+    470  a240
+    471  a240		       c9 03		      cmp	#$03
+    472  a242		       f0 11		      beq	alt
+    473  a244
+    474  a244							; Ignore the rest
+    475  a244		       60		      rts
+    476  a245
+    477  a245				   ntsc
+      0  a245					      PRINTSTRING	ntscstring
+      1  a245		       a0 a5		      ldy	#>ntscstring
+      2  a247		       a9 49		      lda	#<ntscstring
+      3  a249		       20 1e cb 	      jsr	STROUT
+    479  a24c		       60		      rts
+    480  a24d
+    481  a24d				   pal
+      0  a24d					      PRINTSTRING	palstring
+      1  a24d		       a0 a5		      ldy	#>palstring
+      2  a24f		       a9 44		      lda	#<palstring
+      3  a251		       20 1e cb 	      jsr	STROUT
+    483  a254		       60		      rts
+    484  a255
+    485  a255				   alt
+      0  a255					      PRINTSTRING	altstring
+      1  a255		       a0 a5		      ldy	#>altstring
+      2  a257		       a9 4e		      lda	#<altstring
+      3  a259		       20 1e cb 	      jsr	STROUT
+    487  a25c		       60		      rts
+    488  a25d
+    489  a25d							; ---- MOD Wheel Controller --------------------------------------------------
+    490  a25d							; Bc 01 vv
+    491  a25d
+    492  a25d							; Poke the data directly to the register, after OR'ing with $80
+    493  a25d				   modwheel
+    494  a25d		       a5 fd		      lda	mididata1
+    495  a25f		       09 80		      ora	#$80
+    496  a261		       4c 1a a3 	      jmp	setvoice
+    497  a264
+    498  a264							; ---- Volume Controller -----------------------------------------------------
+    499  a264							; Bc 07 vv
+    500  a264
+    501  a264				   volume
+    502  a264		       a5 fd		      lda	mididata1
+    503  a266		       4a		      lsr
+    504  a267		       4a		      lsr
+    505  a268		       4a		      lsr
+    506  a269
+    507  a269				   setvolume
+    508  a269		       8d 0e 90 	      sta	sound_volume
+      0  a26c					      HEXPOKE	(voice_display+110),sound_volume
+      1  a26c		       a9 e5		      lda	#<(voice_display+110)
+      2  a26e		       85 22		      sta	$22
+      3  a270		       a9 1e		      lda	#>(voice_display+110)
+      4  a272		       85 23		      sta	$23
+      5  a274
+      6  a274		       ad 0e 90 	      lda	sound_volume
+      7  a277		       20 e2 a5 	      jsr	hexstr
+    510  a27a		       60		      rts
+    511  a27b
+    512  a27b							; ---- Brightness Controller (used for screen color)--------------------------
+    513  a27b							; Bc 4a vv
+    514  a27b
+    515  a27b				   screencolors
+    516  a27b		       18		      clc
+    517  a27c		       a5 fd		      lda	mididata1	; 7-bit
+    518  a27e
+    519  a27e		       29 07		      and	#%00000111	; Get border
+    520  a280		       85 6c		      sta	temp1
+    521  a282
+    522  a282		       a5 fd		      lda	mididata1
+    523  a284		       29 78		      and	#%01111000	; Get background
+    524  a286		       0a		      asl		; Shift 1 bit left
+    525  a287
+    526  a287		       05 6c		      ora	temp1	; Put border back in
+    527  a289		       09 08		      ora	#%00001000	; No Reverse Mode
+    528  a28b
+    529  a28b		       8d 0f 90 	      sta	screen_colors
+    530  a28e		       60		      rts
+    531  a28f
+    532  a28f							; ---- Sound Off / All Notes Off Controller-----------------------------------
+    533  a28f							; Bc 78 xx
+    534  a28f							; Bc 7B xx
+    535  a28f
+    536  a28f				   soundoff
+    537  a28f		       a9 00		      lda	#$00	; Off
+    538  a291		       4c 1a a3 	      jmp	setvoice
+    539  a294
+    540  a294
+    541  a294							; ---- Program Change --------------------------------------------------------
+    542  a294							; Cc pn  <NOTE 2 bytes!>
+    543  a294
+    544  a294				   programchange
+    545  a294							; Blank the unused MIDI byte
+    546  a294		       a9 2d		      lda	#45	; -
+    547  a296		       8d 53 1e 	      sta	midi_display+6
+    548  a299		       8d 54 1e 	      sta	midi_display+7
+    549  a29c
+    550  a29c							; Get low nybble and replace, since there are only 16 viznut waveforms
+    551  a29c		       a5 fc		      lda	mididata0
+    552  a29e		       29 0f		      and	#$0f
+    553  a2a0		       85 fc		      sta	mididata0	; Note that this is the waveform NUMBER, not the VALUE!
+    554  a2a2
+    555  a2a2		       a4 49		      ldy	channel	; Y now contains channel #
+    556  a2a4		       99 10 10 	      sta	waveform1,y	; Store waveform used
+    557  a2a7
+    558  a2a7		       c0 00		      cpy	#00
+    559  a2a9		       f0 0d		      beq	pc_0
+    560  a2ab
+    561  a2ab		       c0 01		      cpy	#01
+    562  a2ad		       f0 18		      beq	pc_1
+    563  a2af
+    564  a2af		       c0 02		      cpy	#02
+    565  a2b1		       f0 23		      beq	pc_2
+    566  a2b3
+    567  a2b3		       c0 03		      cpy	#03	; Not sure if viznut's waveforms applies to the noise voice,
+    568  a2b5		       f0 2e		      beq	pc_3	; but keep it in away.
+    569  a2b7
+    570  a2b7							; Ignore all other channels
+    571  a2b7		       60		      rts
+    572  a2b8
+    573  a2b8							; Update the screen with Program# (viznut waveform code)
+    574  a2b8							; Note that these are not actually used until setvoice is called below [1]
+    575  a2b8
+    576  a2b8				   pc_0
+      0  a2b8					      HEXPOKE	(voice_display+ 5),waveform1
+      1  a2b8		       a9 7c		      lda	#<(voice_display+ 5)
+      2  a2ba		       85 22		      sta	$22
+      3  a2bc		       a9 1e		      lda	#>(voice_display+ 5)
+      4  a2be		       85 23		      sta	$23
+      5  a2c0
+      6  a2c0		       ad 10 10 	      lda	waveform1
+      7  a2c3		       20 e2 a5 	      jsr	hexstr
+    578  a2c6		       60		      rts
+    579  a2c7
+    580  a2c7				   pc_1
+      0  a2c7					      HEXPOKE	(voice_display+27),waveform2
+      1  a2c7		       a9 92		      lda	#<(voice_display+27)
+      2  a2c9		       85 22		      sta	$22
+      3  a2cb		       a9 1e		      lda	#>(voice_display+27)
+      4  a2cd		       85 23		      sta	$23
+      5  a2cf
+      6  a2cf		       ad 11 10 	      lda	waveform2
+      7  a2d2		       20 e2 a5 	      jsr	hexstr
+    582  a2d5		       60		      rts
+    583  a2d6
+    584  a2d6				   pc_2
+      0  a2d6					      HEXPOKE	(voice_display+49),waveform3
+      1  a2d6		       a9 a8		      lda	#<(voice_display+49)
+      2  a2d8		       85 22		      sta	$22
+      3  a2da		       a9 1e		      lda	#>(voice_display+49)
+      4  a2dc		       85 23		      sta	$23
+      5  a2de
+      6  a2de		       ad 12 10 	      lda	waveform3
+      7  a2e1		       20 e2 a5 	      jsr	hexstr
+    586  a2e4		       60		      rts
+    587  a2e5
+    588  a2e5				   pc_3
+      0  a2e5					      HEXPOKE	(voice_display+71),waveform4
+      1  a2e5		       a9 be		      lda	#<(voice_display+71)
+      2  a2e7		       85 22		      sta	$22
+      3  a2e9		       a9 1e		      lda	#>(voice_display+71)
+      4  a2eb		       85 23		      sta	$23
+      5  a2ed
+      6  a2ed		       ad 13 10 	      lda	waveform4
+      7  a2f0		       20 e2 a5 	      jsr	hexstr
+    590  a2f3		       60		      rts
+    591  a2f4
+    592  a2f4
+    593  a2f4							;---------------------------------------------------------
+    594  a2f4							; Set a voice using viznut's setwave function.
+    595  a2f4							; If a sound is already playing, fine.  But if not, need a "short" delay.  TODO ***
+    596  a2f4
+    597  a2f4				   viznut
+    598  a2f4		       a4 49		      ldy	channel	; Channel # (0-3)
+    599  a2f6		       b9 53 a5 	      lda	voice_to_register,y
+    600  a2f9		       8d 20 10 	      sta	setwavechannel
+    601  a2fc
+    602  a2fc		       a5 5e		      lda	currentvalue	; X now contains initial frequency of selected channel
+    603  a2fe		       8d 21 10 	      sta	setwavefrequency
+    604  a301
+    605  a301		       a4 49		      ldy	channel
+    606  a303		       b9 10 10 	      lda	waveform1,y	; Retrieve the last desired waveform# for this channel
+    607  a306		       aa		      tax
+    608  a307		       bd db a8 	      lda	viznutwaveforms,x	; Retrieve the desired shift register contents for that waveform#
+    609  a30a		       8d 22 10 	      sta	setwaveshiftreg
+    610  a30d
+    611  a30d							; Set X,Y,A as required and set the waveform.
+    612  a30d		       ac 20 10 	      ldy	setwavechannel
+    613  a310		       ae 21 10 	      ldx	setwavefrequency
+    614  a313		       ad 22 10 	      lda	setwaveshiftreg
+    615  a316		       20 00 11 	      jsr	setwave
+    616  a319
+    617  a319							; TODO, update the screen
+    618  a319		       60		      rts
+    619  a31a
+    620  a31a
+    621  a31a							;***************************************************************************
+    622  a31a							;*******************  Set/Display Functions  *******************************
+    623  a31a							;***************************************************************************
+    624  a31a
+    625  a31a							; Dispatcher for setting the appropriate voice and updating the screen
+    626  a31a							; Channel# in Y (Channel 0 = Voice 1, etc)
+    627  a31a							; Value to set it to in A.
+    628  a31a
+    629  a31a				   setvoice
+    630  a31a		       85 5e		      sta	currentvalue
+    631  a31c
+    632  a31c							; Before setting the voice, check if a viznut waveform was selected previously [1]
+    633  a31c							; If so, handle that separately.
+    634  a31c							;lda waveform1,y
+    635  a31c							;bne viznut
+    636  a31c
+    637  a31c							; Nope, carry on.
+    638  a31c		       a5 5e		      lda	currentvalue
+    639  a31e		       a4 49		      ldy	channel	; Y now contains channel #
+    640  a320
+    641  a320		       c0 00		      cpy	#$00
+    642  a322		       f0 0d		      beq	v1
+    643  a324
+    644  a324		       c0 01		      cpy	#$01
+    645  a326		       f0 1b		      beq	v2
+    646  a328
+    647  a328		       c0 02		      cpy	#$02
+    648  a32a		       f0 29		      beq	v3
+    649  a32c
+    650  a32c		       c0 03		      cpy	#$03
+    651  a32e		       f0 37		      beq	v4
+    652  a330
+    653  a330							; Ignore all other channels
+    654  a330		       60		      rts
+    655  a331
+    656  a331							; ---- Voice 1 -------
+    657  a331				   v1
+    658  a331		       8d 0a 90 	      sta	sound_voice1
+      0  a334					      HEXPOKE	(voice_display+00),sound_voice1
+      1  a334		       a9 77		      lda	#<(voice_display+00)
+      2  a336		       85 22		      sta	$22
+      3  a338		       a9 1e		      lda	#>(voice_display+00)
+      4  a33a		       85 23		      sta	$23
+      5  a33c
+      6  a33c		       ad 0a 90 	      lda	sound_voice1
+      7  a33f		       20 e2 a5 	      jsr	hexstr
+    660  a342		       60		      rts
+    661  a343
+    662  a343							; ---- Voice 2 -------
+    663  a343				   v2
+    664  a343		       8d 0b 90 	      sta	sound_voice2
+      0  a346					      HEXPOKE	(voice_display+22),sound_voice2
+      1  a346		       a9 8d		      lda	#<(voice_display+22)
+      2  a348		       85 22		      sta	$22
+      3  a34a		       a9 1e		      lda	#>(voice_display+22)
+      4  a34c		       85 23		      sta	$23
+      5  a34e
+      6  a34e		       ad 0b 90 	      lda	sound_voice2
+      7  a351		       20 e2 a5 	      jsr	hexstr
+    666  a354		       60		      rts
+    667  a355
+    668  a355							; ---- Voice 3 -------
+    669  a355				   v3
+    670  a355		       8d 0c 90 	      sta	sound_voice3
+      0  a358					      HEXPOKE	(voice_display+44),sound_voice3
+      1  a358		       a9 a3		      lda	#<(voice_display+44)
+      2  a35a		       85 22		      sta	$22
+      3  a35c		       a9 1e		      lda	#>(voice_display+44)
+      4  a35e		       85 23		      sta	$23
+      5  a360
+      6  a360		       ad 0c 90 	      lda	sound_voice3
+      7  a363		       20 e2 a5 	      jsr	hexstr
+    672  a366		       60		      rts
+    673  a367
+    674  a367							; ---- Voice 4 -------
+    675  a367				   v4
+    676  a367		       8d 0d 90 	      sta	sound_noise
+      0  a36a					      HEXPOKE	(voice_display+66),sound_noise
+      1  a36a		       a9 b9		      lda	#<(voice_display+66)
+      2  a36c		       85 22		      sta	$22
+      3  a36e		       a9 1e		      lda	#>(voice_display+66)
+      4  a370		       85 23		      sta	$23
+      5  a372
+      6  a372		       ad 0d 90 	      lda	sound_noise
+      7  a375		       20 e2 a5 	      jsr	hexstr
+    678  a378		       60		      rts
+    679  a379
+    680  a379							; ----------------------------------------------------------------------------
+    681  a379
+    682  a379				   setcolors
+    683  a379		       a2 00		      ldx	#$00
+    684  a37b		       a9 00		      lda	#$00
+    685  a37d				   setcolorsloop
+    686  a37d		       9d 00 96 	      sta	$9600,x
+    687  a380		       9d 00 97 	      sta	$9700,x
+    688  a383		       e8		      inx
+    689  a384		       e0 00		      cpx	#$00
+    690  a386		       d0 f5		      bne	setcolorsloop
+    691  a388		       60		      rts
+    692  a389
+    693  a389							; ----------------------------------------------------------------------------
+    694  a389							; Draw Main Screen
+    695  a389
+    696  a389				   mainscreen
+    697  a389		       20 5f e5 	      jsr	CLRSCREEN
+    698  a38c		       a9 1a		      lda	#26	; Decimal, white and red
+    699  a38e		       8d 0f 90 	      sta	screen_colors
+    700  a391		       a9 06		      lda	#$06	; Blue
+    701  a393		       8d 86 02 	      sta	$0286	; Cursor Color
+      0  a396					      PRINTSTRING	maintext
+      1  a396		       a0 a3		      ldy	#>maintext
+      2  a398		       a9 e7		      lda	#<maintext
+      3  a39a		       20 1e cb 	      jsr	STROUT
+    703  a39d		       a9 7f		      lda	#$7F	; was#$6C
+    704  a39f		       8d f9 1f 	      sta	spin_display
+    705  a3a2		       60		      rts
+    706  a3a3
+    707  a3a3
+    708  a3a3							; ----------------------------------------------------------------------------
+    709  a3a3							; Draw Credits Screen
+    710  a3a3
+    711  a3a3				   creditscreen
+    712  a3a3		       20 5f e5 	      jsr	CLRSCREEN
+    713  a3a6		       a9 1e		      lda	#30	; Decimal, white and blue
+    714  a3a8		       8d 0f 90 	      sta	screen_colors
+    715  a3ab		       a9 02		      lda	#$02	; Red
+    716  a3ad		       8d 86 02 	      sta	$0286	; Cursor Color
+      0  a3b0					      PRINTSTRING	credits
+      1  a3b0		       a0 a4		      ldy	#>credits
+      2  a3b2		       a9 82		      lda	#<credits
+      3  a3b4		       20 1e cb 	      jsr	STROUT
+    718  a3b7		       60		      rts
+    719  a3b8
+    720  a3b8
+    721  a3b8							; ----------------------------------------------------------------------------
+    722  a3b8							; setwave needs to start on a page and is self-modifying,
+    723  a3b8							; so it is copied to RAM here
+    724  a3b8
+    725  a3b8				   setwavecopy
+    726  a3b8		       a2 00		      ldx	#$00
+    727  a3ba				   copy1
+    728  a3ba		       bd ae a8 	      lda	setwaveorg,x
+    729  a3bd		       9d 00 11 	      sta	setwave,x
+    730  a3c0		       e8		      inx
+    731  a3c1		       d0 f7		      bne	copy1
+    732  a3c3		       60		      rts
+    733  a3c4
+    734  a3c4
+    735  a3c4							; ----------------------------------------------------------------------------
+    736  a3c4							; Set up the font
+    737  a3c4							;
+    738  a3c4
+    739  a3c4				   setupfont
+    740  a3c4		       a2 00		      ldx	#$00
+    741  a3c6				   copy2
+    742  a3c6		       bd eb ae 	      lda	fontorg,x
+    743  a3c9		       9d 00 18 	      sta	font,x
+    744  a3cc		       bd eb af 	      lda	fontorg+$100,x
+    745  a3cf		       9d 00 19 	      sta	font+$100,x
+    746  a3d2		       bd eb b0 	      lda	fontorg+$200,x
+    747  a3d5		       9d 00 1a 	      sta	font+$200,x
+    748  a3d8		       bd eb b1 	      lda	fontorg+$300,x
+    749  a3db		       9d 00 1b 	      sta	font+$300,x
+    750  a3de		       e8		      inx
+    751  a3df		       d0 e5		      bne	copy2
+    752  a3e1
+    753  a3e1		       a9 fe		      lda	#254	; Decimal  Points char. to 6144
+    754  a3e3		       8d 05 90 	      sta	$9005
+    755  a3e6
+    756  a3e6		       60		      rts
+    757  a3e7
+    758  a3e7							; ----------------------------------------------------------------------------
+    759  a3e7							; Strings
+    760  a3e7
+    761  a3e7				   maintext
+    762  a3e7		       0e 08		      byte.b	CG_LCS, CG_DCS
+    763  a3e9		       2a 76 69 63*	      byte.b	"*vic20 midi iNTERFACE*", CRLF
+    764  a400		       0d		      byte.b	CRLF
+    765  a401		       6d 69 64 69*	      byte.b	"midi dATA: --:--:--", CRLF
+    766  a415		       0d		      byte.b	CRLF
+    767  a416		       76 4f 49 43*	      byte.b	"vOICE 1: -- / --", CRLF
+    768  a427		       76 4f 49 43*	      byte.b	"vOICE 2: -- / --", CRLF
+    769  a438		       76 4f 49 43*	      byte.b	"vOICE 3: -- / --", CRLF
+    770  a449		       76 4f 49 43*	      byte.b	"vOICE 4: -- / --", CRLF
+    771  a45a		       0d		      byte.b	CRLF
+    772  a45b		       76 4f 4c 55*	      byte.b	"vOLUME : --", CRLF
+    773  a467		       62 41 4e 4b*	      byte.b	"bANK	 : --", CRLF
+    774  a473		       0d		      byte.b	CRLF
+    775  a474		       73 59 53 54*	      byte.b	"sYSTEM : ???", CRLF
+    776  a481		       00		      byte.b	0
+    777  a482
+    778  a482
+    779  a482				   credits
+    780  a482		       0e 08		      byte.b	CG_LCS, CG_DCS
+    781  a484		       20 2a 76 69*	      byte.b	" *vic20 midi cREDITS*", CRLF
+    782  a49a		       0d		      byte.b	CRLF
+    783  a49b		       68 41 52 44*	      byte.b	"hARDWARE:", CRLF
+    784  a4a5		       0d		      byte.b	CRLF
+    785  a4a6		       20 20 6a 49*	      byte.b	"  jIM bRAIN", CRLF
+    786  a4b2		       20 20 66 52*	      byte.b	"  fRANCOIS lEVEILLE", CRLF
+    787  a4c6		       20 20 6c 64*	      byte.b	"  ld bALL", CRLF
+    788  a4d0		       0d		      byte.b	CRLF
+    789  a4d1		       73 4f 46 54*	      byte.b	"sOFTWARE:", CRLF
+    790  a4db		       0d		      byte.b	CRLF
+    791  a4dc		       20 6c 45 49*	      byte.b	" lEIF bLOOMQUIST", CRLF
+    792  a4ed		       20 64 41 56*	      byte.b	" dAVID vIENS", CRLF
+    793  a4fa		       20 6d 49 43*	      byte.b	" mICHAEL kIRCHER", CRLF
+    794  a50b		       20 76 49 5a*	      byte.b	" vIZNUT", CRLF
+    795  a513		       0d		      byte.b	CRLF
+    796  a514		       74 48 41 4e*	      byte.b	"tHANKS TO EVERYONE", CRLF
+    797  a527		       4f 4e 20 54*	      byte.b	"ON THE vic20 dENIAL", CRLF
+    798  a53b		       46 4f 52 55*	      byte.b	"FORUMS!", CRLF
+    799  a543		       00		      byte.b	0
+    800  a544
+    801  a544				   palstring
+    802  a544		       70 61 6c 20*	      .byte.b	"pal ",0
+    803  a549
+    804  a549				   ntscstring
+    805  a549		       6e 74 73 63*	      .byte.b	"ntsc",0
+    806  a54e
+    807  a54e				   altstring
+    808  a54e		       61 6c 74 20*	      .byte.b	"alt ",0
+    809  a553
+    810  a553							; ----------------------------------------------------------------------------
+    811  a553							; Lookup table between voice #(0-3) and low byte of register# ($0A-$0D)
+    812  a553
+    813  a553				   voice_to_register
+    814  a553		       0a 0b 0c 0d	      byte.b	$0A,$0B,$0C,$0D
+    815  a557
+    816  a557
+    817  a557							; ----------------------------------------------------------------------------
+    818  a557							; Code includes
+    819  a557
+------- FILE hardware.asm LEVEL 2 PASS 2
+      0  a557					      include	"hardware.asm"
+      1  a557							;***************************************************************************
+      2  a557							;*******************	 Hardware Functions   *******************************
+      3  a557							;***************************************************************************
+      4  a557
+      5  a557							; ----------------------------------------------------------------------------
+      6  a557							; Confirm the presence of the ST16C450 UART
+      7  a557				   checkuart
+      8  a557		       a9 55		      lda	#$55
+      9  a559		       8d 07 9c 	      sta	UART_SCRATCHPAD
+     10  a55c
+     11  a55c		       ad 07 9c 	      lda	UART_SCRATCHPAD
+     12  a55f		       c9 55		      cmp	#$55
+     13  a561		       f0 1c		      beq	checkuart_ok
+     14  a563
+     15  a563							; Not found!
+      0  a563					      PLOT	0,20
+      1  a563		       a0 00		      ldy	#0
+      2  a565		       a2 14		      ldx	#20
+      3  a567		       18		      clc
+      4  a568		       20 0a e5 	      jsr	$E50A
+      0  a56b					      PRINTSTRING	nouart
+      1  a56b		       a0 a5		      ldy	#>nouart
+      2  a56d		       a9 cc		      lda	#<nouart
+      3  a56f		       20 1e cb 	      jsr	STROUT
+     18  a572
+     19  a572				   uloop
+     20  a572		       a9 18		      lda	#24
+     21  a574		       8d 0f 90 	      sta	screen_colors
+     22  a577		       a9 1a		      lda	#26
+     23  a579		       8d 0f 90 	      sta	screen_colors
+     24  a57c		       4c 72 a5 	      jmp	uloop
+     25  a57f
+     26  a57f				   checkuart_ok
+     27  a57f		       60		      rts
+     28  a580
+     29  a580							; ----------------------------------------------------------------------------
+     30  a580							; Set up the UART
+     31  a580
+     32  a580				   resetuart
+     33  a580							; Expose the divisor latch.
+     34  a580		       a9 80		      lda	#%10000000
+     35  a582		       8d 03 9c 	      sta	UART_LCR
+     36  a585
+     37  a585							; Set the MIDI baud rate.
+     38  a585							; The ST16C450 datasheet says that it divides the input clock rate by
+     39  a585							; 16, so with a 2MHz crystal on board, that gives
+     40  a585							; 2000000 * (1/16) * (1/x) = 31250.  Solving gives x=4 for the low
+     41  a585							; byte of the divisor, and 0 for the high byte.
+     42  a585
+     43  a585		       a2 00		      ldx	#$00
+     44  a587							;ldy #$04  ; For 2MHz	crystal   (Original protype from Francois)
+     45  a587							;ldy #$08  ; For 4MHz	crystal   (Prototype from Brain)
+     46  a587		       a0 25		      ldy	#$25	; For 18MHz crystal   (Pre-production cartridge from Brain)
+     47  a589
+     48  a589		       8e 01 9c 	      stx	UART_DIVISOR_MSB
+     49  a58c		       8c 00 9c 	      sty	UART_DIVISOR_LSB
+     50  a58f
+     51  a58f							; Set to MIDI: Word length 8, Stop bits 1, no parity (also hides divisor latch)
+     52  a58f		       a9 03		      lda	#%00000011
+     53  a591		       8d 03 9c 	      sta	UART_LCR
+     54  a594
+     55  a594							; New for VICMIDI Pre-production cart - select MIDI
+     56  a594		       a9 04		      lda	#$04
+     57  a596		       8d 04 9c 	      sta	UART_MCR
+     58  a599
+     59  a599							; Enable the interrupt when data is received
+     60  a599		       a9 01		      lda	#%00000001
+     61  a59b		       8d 01 9c 	      sta	UART_IER
+     62  a59e		       60		      rts
+     63  a59f
+     64  a59f							; ----------------------------------------------------------------------------
+     65  a59f							; Set up the IRQ for reading bytes from the UART
+     66  a59f
+     67  a59f				   setupirq
+     68  a59f		       78		      sei
+     69  a5a0
+     70  a5a0				  -	      ifnconst	USE_NMI
+     71  a5a0				  -			; Point to my interrupt vector
+     72  a5a0				  -	      lda	#<theirq
+     73  a5a0				  -	      sta	$0314
+     74  a5a0				  -	      lda	#>theirq
+     75  a5a0				  -	      sta	$0315
+     76  a5a0					      else
+     77  a5a0		       a9 b4		      lda	#<thenmi
+     78  a5a2		       8d 18 03 	      sta	$0318
+     79  a5a5		       a9 a5		      lda	#>thenmi
+     80  a5a7		       8d 19 03 	      sta	$0319
+     81  a5aa					      eif
+     82  a5aa
+     83  a5aa							; Disable timer interrupts
+     84  a5aa
+     85  a5aa		       a9 60		      lda	#%01100000
+     86  a5ac		       8d 2e 91 	      sta	$912e	; disable and acknowledge interrupts
+     87  a5af		       8d 2d 91 	      sta	$912d
+     88  a5b2							;sta $911e	; disable NMIs (Restore key)
+     89  a5b2
+     90  a5b2		       58		      cli
+     91  a5b3		       60		      rts
+     92  a5b4
+     93  a5b4							; ----------------------------------------------------------------------------
+     94  a5b4							; The IRQ.
+     95  a5b4
+     96  a5b4				   thenmi
+     97  a5b4					      ifconst	USE_NMI
+     98  a5b4		       48		      pha
+     99  a5b5		       8a		      txa
+    100  a5b6		       48		      pha
+    101  a5b7		       98		      tya
+    102  a5b8		       48		      pha
+    103  a5b9					      eif
+    104  a5b9
+    105  a5b9				   theirq
+    106  a5b9							; Fetch the received byte
+    107  a5b9		       ad 00 9c 	      lda	UART_RXTX	;get data
+    108  a5bc		       a4 5c		      ldy	write_pointer
+    109  a5be		       99 00 12 	      sta	buffer,y
+    110  a5c1		       e6 5c		      inc	write_pointer
+    111  a5c3
+    112  a5c3							; Clear the interrupt from the UART by reading the status register
+    113  a5c3		       ad 02 9c 	      lda	UART_ISR
+    114  a5c6
+    115  a5c6		       4c 56 ff 	      jmp	$ff56	; Use this in place of rti because it restores the A,X,Y registers from the stack
+    116  a5c9							;jmp $eabf	; return to normal IRQ	(scans keyboard and stuff)
+    117  a5c9
+    118  a5c9
+    119  a5c9							; ----------------------------------------------------------------------------
+    120  a5c9							; Handle the RESTORE key
+    121  a5c9
+    122  a5c9				   RESTORE
+    123  a5c9		       4c c7 fe 	      jmp	$fec7	; Continue as if no cartridge installed
+    124  a5cc
+    125  a5cc
+    126  a5cc							; ----------------------------------------------------------------------------
+    127  a5cc							; Strings
+    128  a5cc
+    129  a5cc				   nouart
+    130  a5cc		       7f 7f 20 75*	      byte.b	127,127, " uart NOT FOUND! ", 127,127
+    131  a5e1		       00		      byte.b	0
+    132  a5e2
+    133  a5e2							; EOF!
+------- FILE vicmidi.asm
+------- FILE utils.asm LEVEL 2 PASS 2
+      0  a5e2					      include	"utils.asm"
+      1  a5e2							; VIC Version by Schema/AIC (Leif Bloomquist)
+      2  a5e2							; Original by Six/Style (Oliver VieBrooks)
+      3  a5e2
+      4  a5e2							; Fast POKE of hex value to screen
+      5  a5e2							; also see HEXPOKE macro
+      6  a5e2							; print hex  char $ of number in a at location referenced by screen_temp
+      7  a5e2
+      8  a5e2				   hexstr
+      9  a5e2		       a0 00		      ldy	#$00
+     10  a5e4		       48		      pha
+     11  a5e5		       29 f0		      and	#$f0
+     12  a5e7		       18		      clc
+     13  a5e8		       4a		      lsr
+     14  a5e9		       4a		      lsr
+     15  a5ea		       4a		      lsr
+     16  a5eb		       4a		      lsr
+     17  a5ec		       aa		      tax
+     18  a5ed		       bd 1e a6 	      lda	hexstring,x
+     19  a5f0		       91 22		      sta	($22),y
+     20  a5f2
+     21  a5f2		       c8		      iny
+     22  a5f3		       68		      pla
+     23  a5f4		       29 0f		      and	#$0f
+     24  a5f6		       aa		      tax
+     25  a5f7		       bd 1e a6 	      lda	hexstring,x
+     26  a5fa		       91 22		      sta	($22),y
+     27  a5fc		       60		      rts
+     28  a5fd
+     29  a5fd
+     30  a5fd							; print hex  char $ of number in a    SLOW!
+     31  a5fd		       00	   hexx       dc.b	$00
+     32  a5fe
+     33  a5fe				   printhexstr
+     34  a5fe		       8e fd a5 	      stx	hexx
+     35  a601		       48		      pha
+     36  a602		       29 f0		      and	#$f0
+     37  a604		       18		      clc
+     38  a605		       4a		      lsr
+     39  a606		       4a		      lsr
+     40  a607		       4a		      lsr
+     41  a608		       4a		      lsr
+     42  a609		       aa		      tax
+     43  a60a		       bd 1e a6 	      lda	hexstring,x
+     44  a60d		       20 d2 ff 	      jsr	$ffd2
+     45  a610
+     46  a610		       68		      pla
+     47  a611		       29 0f		      and	#$0f
+     48  a613		       aa		      tax
+     49  a614		       bd 1e a6 	      lda	hexstring,x
+     50  a617		       20 d2 ff 	      jsr	$ffd2
+     51  a61a		       ae fd a5 	      ldx	hexx
+     52  a61d		       60		      rts
+     53  a61e
+     54  a61e				   hexstring
+     55  a61e		       30 31 32 33*	      .byte.b	"0123456789ABCDEF"
+     56  a62e
+     57  a62e
+     58  a62e							; ==============================================================
+     59  a62e							; Most defaults are NTSC.  This code overrides for PAL.
+     60  a62e							; ==============================================================
+     61  a62e
+     62  a62e				   setup_pal
+     63  a62e		       ad e4 ed 	      lda	$EDE4
+     64  a631		       c9 0c		      cmp	#$0C
+     65  a633		       f0 07		      beq	DOPAL
+     66  a635
+     67  a635							; NTSC System detected
+     68  a635		       a9 00		      lda	#$00
+     69  a637		       85 4a		      sta	bank
+     70  a639		       4c 1d a2 	      jmp	showbank	; There's an rts there
+     71  a63c
+     72  a63c							; PAL System detected
+     73  a63c				   DOPAL
+     74  a63c		       a9 01		      lda	#$01
+     75  a63e		       85 4a		      sta	bank
+     76  a640		       4c 1d a2 	      jmp	showbank	; There's an rts there
+     77  a643
+     78  a643							; EOF!
+------- FILE vicmidi.asm
+------- FILE polymode.asm LEVEL 2 PASS 2
+      0  a643					      include	"polymode.asm"
+      1  a643
+      2  a643							;***************************************************************************
+      3  a643							;***************  Determine next Channel in Poly Mode (set Y) **************
+      4  a643							;***************************************************************************
+      5  a643				   get_poly_voice
+      6  a643		       a0 00		      ldy	#$00
+      7  a645
+      8  a645				   get_poly_voice_loop
+      9  a645		       b9 61 00 	      lda	poly_flags,y	; 0=not in use, 1=in use
+     10  a648		       f0 08		      beq	get_poly_voice_x
+     11  a64a		       c8		      iny
+     12  a64b		       c0 04		      cpy	#$04	; Note that we're only checking the first 3 voices - n/a to noise voice.
+     13  a64d		       d0 f6		      bne	get_poly_voice_loop
+     14  a64f
+     15  a64f							; No free voices, ignore
+     16  a64f		       a0 04		      ldy	#$04	; Invalid channel, will be ignored by Note On code
+     17  a651		       60		      rts
+     18  a652
+     19  a652				   get_poly_voice_x
+     20  a652		       a9 01		      lda	#$01
+     21  a654		       99 61 00 	      sta	poly_flags,y
+     22  a657		       60		      rts
+     23  a658
+     24  a658
+     25  a658							;***************************************************************************
+     26  a658							;********  Determine Channel to turn off in Poly Mode (set Y) **************
+     27  a658							;***************************************************************************
+     28  a658				   get_poly_voice_off
+     29  a658
+     30  a658		       a0 00		      ldy	#$00
+     31  a65a
+     32  a65a				   get_poly_voice_off_loop
+     33  a65a		       b9 61 00 	      lda	poly_flags,y	; Is the channel in use?
+     34  a65d		       f0 07		      beq	poly_next	; No, so skip it
+     35  a65f
+     36  a65f		       b9 68 00 	      lda	lastnote,y	; Get last note on this voice
+     37  a662		       c5 fc		      cmp	mididata0	; Compare to note received
+     38  a664		       f0 0b		      beq	get_poly_voice_off_x	; Matched!
+     39  a666
+     40  a666				   poly_next
+     41  a666		       c8		      iny		; Next channel
+     42  a667		       c0 04		      cpy	#$04	; Note that we're only checking the first 3 voices - n/a to noise voice.
+     43  a669		       d0 ef		      bne	get_poly_voice_off_loop
+     44  a66b
+     45  a66b							; No match to the note to turn off, ignore
+     46  a66b		       a0 04		      ldy	#$04	; Invalid channel, will be ignored by Note Off code
+     47  a66d		       ee 0f 90 	      inc	screen_colors	; DEBUG
+     48  a670		       60		      rts
+     49  a671
+     50  a671				   get_poly_voice_off_x
+     51  a671		       a9 00		      lda	#$00
+     52  a673		       99 61 00 	      sta	poly_flags,y
+     53  a676		       60		      rts
+     54  a677
+------- FILE vicmidi.asm
+------- FILE keyboard.asm LEVEL 2 PASS 2
+      0  a677					      include	"keyboard.asm"
+      1  a677							;*******************************************************************************************
+      2  a677							;********************************  keyboard stuff  *****************************************
+      3  a677							;*******************************************************************************************	
+      4  a677
+      5  a677							; --------------------------------------------------------------------------------------------------	
+      6  a677							;;;;;;;;;;;;;;; keyboard stuff
+      7  a677							;previous keyboard column bits
+      8  a677		       00 4e	   c0	      =	$4E	; 2,4,6,8,(...)
+      9  a677		       00 4f	   c1	      =	$4F	; q,e,t,u,(...)
+     10  a677		       00 50	   c2	      =	$50	; w,r,y,i,p,(...)
+     11  a677		       00 51	   c3	      =	$51	; 1,3,5,7,(...)
+     12  a677
+     13  a677		       91 20	   kb_column  =	$9120
+     14  a677		       91 21	   kb_row     =	$9121
+     15  a677
+     16  a677							; 9121   9120: (Write column value to this address)
+     17  a677							;
+     18  a677							;	  7f	  bf	  df	  ef	  f7	  fb	  fd	  fe
+     19  a677							;
+     20  a677							;  fe	  2	  q	  CBM	  Space   RunStop Control Lft_arr 1	  
+     21  a677							;  fd	  4	  e	  s	  z	  Shift_L a	  w	  3	  
+     22  a677							;  fb	  6	  t	  f	  c	  x	  d	  r	  5	  
+     23  a677							;  f7	  8	  u	  h	  b	  v	  g	  y	  7	  
+     24  a677							;  ef	  0	  o	  k	  m	  n	  j	  i	  9
+     25  a677							;  df	  -	  @	  :	  .	  ,	  l	  p	  +
+     26  a677							;  bf	  Home	  Up_arr  =	  Shift_R /	  ;	  *	  GBP 
+     27  a677							;  7f	  F7	  F5	  F3	  F1	  Down	  Right   Return  Del
+     28  a677
+     29  a677				   GetKey
+     30  a677		       78		      sei
+     31  a678							; this should not be done, we want to compare the OLD recorded status with new one
+     32  a678							;lda #$0
+     33  a678							;sta kb_column
+     34  a678							;lda kb_row
+     35  a678							;cmp #$FF
+     36  a678							;beq NoKey	 ; no key at all pressed
+     37  a678
+     38  a678				   Check7F
+     39  a678							;now check for each column
+     40  a678		       a9 7f		      lda	#$7F
+     41  a67a		       8d 20 91 	      sta	kb_column
+     42  a67d		       ad 21 91 	      lda	kb_row
+     43  a680		       49 ff		      eor	#$FF	; inversed accumulator contains all bits in this column
+     44  a682		       c5 4e		      cmp	c0
+     45  a684		       f0 08		      beq	CheckBF	; these arent the droids you are looking for move along
+     46  a686		       85 4e		      sta	c0
+     47  a688		       8d 00 1e 	      sta	$1E00
+     48  a68b		       4c cd a6 	      jmp	KeyDone
+     49  a68e				   CheckBF
+     50  a68e							;now check for each column
+     51  a68e		       a9 bf		      lda	#$BF
+     52  a690		       8d 20 91 	      sta	kb_column
+     53  a693		       ad 21 91 	      lda	kb_row
+     54  a696		       49 ff		      eor	#$FF	; inversed accumulator contains all bits in this column
+     55  a698		       c5 4f		      cmp	c1
+     56  a69a		       f0 08		      beq	CheckFD	; these arent the droids you are looking for move along
+     57  a69c		       85 4f		      sta	c1
+     58  a69e		       8d 01 1e 	      sta	$1E01
+     59  a6a1		       4c cd a6 	      jmp	KeyDone
+     60  a6a4				   CheckFD
+     61  a6a4							;now check for each column
+     62  a6a4		       a9 fd		      lda	#$FD
+     63  a6a6		       8d 20 91 	      sta	kb_column
+     64  a6a9		       ad 21 91 	      lda	kb_row
+     65  a6ac		       49 ff		      eor	#$FF	; inversed accumulator contains all bits in this column
+     66  a6ae		       c5 50		      cmp	c2
+     67  a6b0		       f0 08		      beq	CheckFE	; these arent the droids you are looking for move along
+     68  a6b2		       85 50		      sta	c2
+     69  a6b4		       8d 02 1e 	      sta	$1E02
+     70  a6b7		       4c cd a6 	      jmp	KeyDone
+     71  a6ba				   CheckFE
+     72  a6ba							;now check for each column
+     73  a6ba		       a9 fe		      lda	#$FE
+     74  a6bc		       8d 20 91 	      sta	kb_column
+     75  a6bf		       ad 21 91 	      lda	kb_row
+     76  a6c2		       49 ff		      eor	#$FF	; inversed accumulator contains all bits in this column
+     77  a6c4		       c5 51		      cmp	c3
+     78  a6c6		       f0 05		      beq	KeyDone	; these arent the droids you are looking for move along
+     79  a6c8		       85 51		      sta	c3
+     80  a6ca		       8d 03 1e 	      sta	$1E03
+     81  a6cd				   KeyDone
+     82  a6cd		       58		      cli
+     83  a6ce		       60		      rts
+     84  a6cf
+     85  a6cf							; ---------------------------------------------------------------------------	
+     86  a6cf
+     87  a6cf				   setchars
+     88  a6cf		       a2 00		      ldx	#$00
+     89  a6d1		       a9 51		      lda	#$51
+     90  a6d3				   setcharsloop1
+     91  a6d3		       9d 00 1e 	      sta	$1E00,x
+     92  a6d6		       e8		      inx
+     93  a6d7		       e0 00		      cpx	#$00
+     94  a6d9		       d0 f8		      bne	setcharsloop1
+     95  a6db		       a2 00		      ldx	#$00
+     96  a6dd		       a9 66		      lda	#$66
+     97  a6df				   setcharsloop2
+     98  a6df		       9d 00 1f 	      sta	$1F00,x
+     99  a6e2		       e8		      inx
+    100  a6e3		       e0 00		      cpx	#$00
+    101  a6e5		       d0 f8		      bne	setcharsloop2
+    102  a6e7		       60		      rts
+    103  a6e8
+    104  a6e8
+    105  a6e8
+    106  a6e8							; --------------------------------------------------------------------------- 
+    107  a6e8							; Quick hack using KERNAL routines to read the keyboard
+    108  a6e8
+    109  a6e8				   ReadKey
+    110  a6e8		       20 1e eb 	      jsr	ISCNKY	; Call this manually since the main timer IRQ is disabled.
+    111  a6eb
+    112  a6eb		       a5 c5		      lda	$C5	; Current key?
+    113  a6ed		       c9 40		      cmp	#$40	; None
+    114  a6ef		       d0 11		      bne	keypressed
+    115  a6f1
+    116  a6f1							; No key was pressed.	But was one pressed previously?
+    117  a6f1		       ad 23 10 	      lda	midinoteout
+    118  a6f4		       f0 0b		      beq	key_x	; No
+    119  a6f6
+    120  a6f6							; Yes, so turn that note off.
+    121  a6f6		       20 5d a7 	      jsr	sendnoteoff
+    122  a6f9		       a9 00		      lda	#$00
+    123  a6fb		       8d 23 10 	      sta	midinoteout
+    124  a6fe
+    125  a6fe		       ce 0f 90 	      dec	screen_colors
+    126  a701
+    127  a701				   key_x
+    128  a701		       60		      rts
+    129  a702
+    130  a702
+    131  a702				   keypressed		; A contains key code
+    132  a702		       aa		      tax
+    133  a703		       bd ae a7 	      lda	notelookup,x
+    134  a706		       f0 f9		      beq	key_x	; Note was 0, in this context meaning no note
+    135  a708
+    136  a708							; Same note as before?
+    137  a708		       cd 23 10 	      cmp	midinoteout
+    138  a70b		       f0 f4		      beq	key_x	; Yes, do nothing
+    139  a70d
+    140  a70d							; New note - send it	  
+    141  a70d
+    142  a70d		       8d 23 10 	      sta	midinoteout
+    143  a710		       20 17 a7 	      jsr	sendnoteon
+    144  a713
+    145  a713		       ee 0f 90 	      inc	screen_colors
+    146  a716
+    147  a716		       60		      rts
+    148  a717
+    149  a717
+    150  a717
+    151  a717							; ---------------------------------------------------------------------------	   
+    152  a717							; Send a NOTE ON MIDI Message.
+    153  a717
+    154  a717				   sendnoteon
+    155  a717		       20 a3 a7 	      jsr	wait_tx
+    156  a71a		       ad ab a7 	      lda	noteonval	; Note on
+    157  a71d		       8d 00 9c 	      sta	UART_RXTX
+    158  a720
+    159  a720		       20 a3 a7 	      jsr	wait_tx
+    160  a723		       ad 23 10 	      lda	midinoteout
+    161  a726		       8d 00 9c 	      sta	UART_RXTX
+    162  a729
+    163  a729		       20 a3 a7 	      jsr	wait_tx
+    164  a72c		       ad ad a7 	      lda	defaultvelocity
+    165  a72f		       8d 00 9c 	      sta	UART_RXTX
+    166  a732
+    167  a732							; Display
+      0  a732					      HEXPOKE	(midi_display+0),noteonval
+      1  a732		       a9 4d		      lda	#<(midi_display+0)
+      2  a734		       85 22		      sta	$22
+      3  a736		       a9 1e		      lda	#>(midi_display+0)
+      4  a738		       85 23		      sta	$23
+      5  a73a
+      6  a73a		       ad ab a7 	      lda	noteonval
+      7  a73d		       20 e2 a5 	      jsr	hexstr
+      0  a740					      HEXPOKE	(midi_display+3),midinoteout
+      1  a740		       a9 50		      lda	#<(midi_display+3)
+      2  a742		       85 22		      sta	$22
+      3  a744		       a9 1e		      lda	#>(midi_display+3)
+      4  a746		       85 23		      sta	$23
+      5  a748
+      6  a748		       ad 23 10 	      lda	midinoteout
+      7  a74b		       20 e2 a5 	      jsr	hexstr
+      0  a74e					      HEXPOKE	(midi_display+6),defaultvelocity
+      1  a74e		       a9 53		      lda	#<(midi_display+6)
+      2  a750		       85 22		      sta	$22
+      3  a752		       a9 1e		      lda	#>(midi_display+6)
+      4  a754		       85 23		      sta	$23
+      5  a756
+      6  a756		       ad ad a7 	      lda	defaultvelocity
+      7  a759		       20 e2 a5 	      jsr	hexstr
+    171  a75c
+    172  a75c		       60		      rts
+    173  a75d
+    174  a75d
+    175  a75d							; ---------------------------------------------------------------------------	   
+    176  a75d							; Send a NOTE OFF MIDI Message.
+    177  a75d
+    178  a75d				   sendnoteoff
+    179  a75d		       20 a3 a7 	      jsr	wait_tx
+    180  a760		       ad ac a7 	      lda	noteoffval	; Note off
+    181  a763		       8d 00 9c 	      sta	UART_RXTX
+    182  a766
+    183  a766		       20 a3 a7 	      jsr	wait_tx
+    184  a769		       ad 23 10 	      lda	midinoteout
+    185  a76c		       8d 00 9c 	      sta	UART_RXTX
+    186  a76f
+    187  a76f		       20 a3 a7 	      jsr	wait_tx
+    188  a772		       ad ad a7 	      lda	defaultvelocity	; Decimal - convention for velocity when velocity not supported.
+    189  a775		       8d 00 9c 	      sta	UART_RXTX
+    190  a778
+    191  a778							; Display
+      0  a778					      HEXPOKE	(midi_display+0),noteoffval
+      1  a778		       a9 4d		      lda	#<(midi_display+0)
+      2  a77a		       85 22		      sta	$22
+      3  a77c		       a9 1e		      lda	#>(midi_display+0)
+      4  a77e		       85 23		      sta	$23
+      5  a780
+      6  a780		       ad ac a7 	      lda	noteoffval
+      7  a783		       20 e2 a5 	      jsr	hexstr
+      0  a786					      HEXPOKE	(midi_display+3),midinoteout
+      1  a786		       a9 50		      lda	#<(midi_display+3)
+      2  a788		       85 22		      sta	$22
+      3  a78a		       a9 1e		      lda	#>(midi_display+3)
+      4  a78c		       85 23		      sta	$23
+      5  a78e
+      6  a78e		       ad 23 10 	      lda	midinoteout
+      7  a791		       20 e2 a5 	      jsr	hexstr
+      0  a794					      HEXPOKE	(midi_display+6),defaultvelocity
+      1  a794		       a9 53		      lda	#<(midi_display+6)
+      2  a796		       85 22		      sta	$22
+      3  a798		       a9 1e		      lda	#>(midi_display+6)
+      4  a79a		       85 23		      sta	$23
+      5  a79c
+      6  a79c		       ad ad a7 	      lda	defaultvelocity
+      7  a79f		       20 e2 a5 	      jsr	hexstr
+    195  a7a2
+    196  a7a2		       60		      rts
+    197  a7a3
+    198  a7a3
+    199  a7a3							; --------------------------------------------------------------------------- 
+    200  a7a3							; Quick hack to wait for THR to be empty.  Ideally sending would be
+    201  a7a3							; interrupt-driven with a ring buffer.
+    202  a7a3
+    203  a7a3				   wait_tx
+    204  a7a3		       ad 05 9c 	      lda	UART_LSR
+    205  a7a6		       29 20		      and	#32
+    206  a7a8		       f0 f9		      beq	wait_tx
+    207  a7aa		       60		      rts
+    208  a7ab
+    209  a7ab				   noteonval
+    210  a7ab		       90		      byte.b	$90
+    211  a7ac
+    212  a7ac				   noteoffval
+    213  a7ac		       80		      byte.b	$80
+    214  a7ad
+    215  a7ad				   defaultvelocity
+    216  a7ad		       40		      byte.b	64	; Decimal - convention for velocity when velocity not supported.   
+    217  a7ae
+    218  a7ae				   notelookup
+    219  a7ae
+    220  a7ae							;	MIDI Note#		Comments
+    221  a7ae		       00		      byte.b	0	;	
+    222  a7af		       3f		      byte.b	63	;	
+    223  a7b0		       42		      byte.b	66	;	
+    224  a7b1		       46		      byte.b	70	;	
+    225  a7b2		       49		      byte.b	73	;	
+    226  a7b3		       00		      byte.b	0	;	
+    227  a7b4		       50		      byte.b	80	;	
+    228  a7b5		       53		      byte.b	83	;	
+    229  a7b6		       00		      byte.b	0	;	
+    230  a7b7		       3e		      byte.b	62	;	
+    231  a7b8		       41		      byte.b	65	;	
+    232  a7b9		       45		      byte.b	69	;	
+    233  a7ba		       48		      byte.b	72	;	
+    234  a7bb		       4c		      byte.b	76	;	
+    235  a7bc		       4f		      byte.b	79	;	
+    236  a7bd		       00		      byte.b	0	;	
+    237  a7be		       00		      byte.b	0	;	
+    238  a7bf		       00		      byte.b	0	;	
+    239  a7c0		       00		      byte.b	0	;	
+    240  a7c1		       00		      byte.b	0	;	
+    241  a7c2		       00		      byte.b	0	;	
+    242  a7c3		       00		      byte.b	0	;	
+    243  a7c4		       00		      byte.b	0	;	
+    244  a7c5		       00		      byte.b	0	;	
+    245  a7c6		       00		      byte.b	0	;	
+    246  a7c7		       00		      byte.b	0	;	
+    247  a7c8		       00		      byte.b	0	;	
+    248  a7c9		       00		      byte.b	0	;	
+    249  a7ca		       00		      byte.b	0	;	
+    250  a7cb		       00		      byte.b	0	;	
+    251  a7cc		       00		      byte.b	0	;	
+    252  a7cd		       00		      byte.b	0	;	
+    253  a7ce		       00		      byte.b	0	;	
+    254  a7cf		       00		      byte.b	0	;	
+    255  a7d0		       00		      byte.b	0	;	
+    256  a7d1		       00		      byte.b	0	;	
+    257  a7d2		       00		      byte.b	0	;	
+    258  a7d3		       00		      byte.b	0	;	
+    259  a7d4		       00		      byte.b	0	;	
+    260  a7d5		       00		      byte.b	0	;	
+    261  a7d6		       00		      byte.b	0	;	
+    262  a7d7		       00		      byte.b	0	;	
+    263  a7d8		       00		      byte.b	0	;	
+    264  a7d9		       00		      byte.b	0	;	
+    265  a7da		       00		      byte.b	0	;	
+    266  a7db		       00		      byte.b	0	;	
+    267  a7dc		       00		      byte.b	0	;	
+    268  a7dd		       00		      byte.b	0	;	
+    269  a7de		       3c		      byte.b	60	;	Middle C (C5)
+    270  a7df		       40		      byte.b	64	;	
+    271  a7e0		       43		      byte.b	67	;	
+    272  a7e1		       47		      byte.b	71	;	
+    273  a7e2		       4a		      byte.b	74	;	
+    274  a7e3		       4d		      byte.b	77	;	
+    275  a7e4		       51		      byte.b	81	;	
+    276  a7e5		       00		      byte.b	0	;	
+    277  a7e6		       3d		      byte.b	61	;	
+    278  a7e7		       00		      byte.b	0	;	
+    279  a7e8		       44		      byte.b	68	;	
+    280  a7e9		       00		      byte.b	0	;	
+    281  a7ea		       4b		      byte.b	75	;	
+    282  a7eb		       4e		      byte.b	78	;	
+    283  a7ec		       52		      byte.b	82	;	
+    284  a7ed		       00		      byte.b	0	;	
+    285  a7ee		       00		      byte.b	0	;	No key Pressed
+    286  a7ef		       00		      byte.b	0	;	
+    287  a7f0		       00		      byte.b	0	;	
+    288  a7f1		       00		      byte.b	0	;	
+    289  a7f2		       00		      byte.b	0	;	
+    290  a7f3		       00		      byte.b	0	;	
+    291  a7f4		       00		      byte.b	0	;	
+    292  a7f5		       00		      byte.b	0	;	
+    293  a7f6		       00		      byte.b	0	;	
+    294  a7f7		       00		      byte.b	0	;	
+    295  a7f8		       00		      byte.b	0	;	
+    296  a7f9		       00		      byte.b	0	;	
+    297  a7fa		       00		      byte.b	0	;	
+    298  a7fb		       00		      byte.b	0	;	
+    299  a7fc		       00		      byte.b	0	;	
+    300  a7fd		       00		      byte.b	0	;	
+    301  a7fe		       00		      byte.b	0	;	
+    302  a7ff		       00		      byte.b	0	;	
+    303  a800		       00		      byte.b	0	;	
+    304  a801		       00		      byte.b	0	;	
+    305  a802		       00		      byte.b	0	;	
+    306  a803		       00		      byte.b	0	;	
+    307  a804		       00		      byte.b	0	;	
+    308  a805		       00		      byte.b	0	;	
+    309  a806		       00		      byte.b	0	;	
+    310  a807		       00		      byte.b	0	;	
+    311  a808		       00		      byte.b	0	;	
+    312  a809		       00		      byte.b	0	;	
+    313  a80a		       00		      byte.b	0	;	
+    314  a80b		       00		      byte.b	0	;	
+    315  a80c		       00		      byte.b	0	;	
+    316  a80d		       00		      byte.b	0	;	
+    317  a80e		       00		      byte.b	0	;	
+    318  a80f		       00		      byte.b	0	;	
+    319  a810		       00		      byte.b	0	;	
+    320  a811		       00		      byte.b	0	;	
+    321  a812		       00		      byte.b	0	;	
+    322  a813		       00		      byte.b	0	;	
+    323  a814		       00		      byte.b	0	;	
+    324  a815		       00		      byte.b	0	;	
+    325  a816		       00		      byte.b	0	;	
+    326  a817		       00		      byte.b	0	;	
+    327  a818		       00		      byte.b	0	;	
+    328  a819		       00		      byte.b	0	;	
+    329  a81a		       00		      byte.b	0	;	
+    330  a81b		       00		      byte.b	0	;	
+    331  a81c		       00		      byte.b	0	;	
+    332  a81d		       00		      byte.b	0	;	
+    333  a81e		       00		      byte.b	0	;	
+    334  a81f		       00		      byte.b	0	;	
+    335  a820		       00		      byte.b	0	;	
+    336  a821		       00		      byte.b	0	;	
+    337  a822		       00		      byte.b	0	;	
+    338  a823		       00		      byte.b	0	;	
+    339  a824		       00		      byte.b	0	;	
+    340  a825		       00		      byte.b	0	;	
+    341  a826		       00		      byte.b	0	;	
+    342  a827		       00		      byte.b	0	;	
+    343  a828		       00		      byte.b	0	;	
+    344  a829		       00		      byte.b	0	;	
+    345  a82a		       00		      byte.b	0	;	
+    346  a82b		       00		      byte.b	0	;	
+    347  a82c		       00		      byte.b	0	;	
+    348  a82d		       00		      byte.b	0	;	
+    349  a82e		       00		      byte.b	0	;	
+    350  a82f		       00		      byte.b	0	;	
+    351  a830		       00		      byte.b	0	;	
+    352  a831		       00		      byte.b	0	;	
+    353  a832		       00		      byte.b	0	;	
+    354  a833		       00		      byte.b	0	;	
+    355  a834		       00		      byte.b	0	;	
+    356  a835		       00		      byte.b	0	;	
+    357  a836		       00		      byte.b	0	;	
+    358  a837		       00		      byte.b	0	;	
+    359  a838		       00		      byte.b	0	;	
+    360  a839		       00		      byte.b	0	;	
+    361  a83a		       00		      byte.b	0	;	
+    362  a83b		       00		      byte.b	0	;	
+    363  a83c		       00		      byte.b	0	;	
+    364  a83d		       00		      byte.b	0	;	
+    365  a83e		       00		      byte.b	0	;	
+    366  a83f		       00		      byte.b	0	;	
+    367  a840		       00		      byte.b	0	;	
+    368  a841		       00		      byte.b	0	;	
+    369  a842		       00		      byte.b	0	;	
+    370  a843		       00		      byte.b	0	;	
+    371  a844		       00		      byte.b	0	;	
+    372  a845		       00		      byte.b	0	;	
+    373  a846		       00		      byte.b	0	;	
+    374  a847		       00		      byte.b	0	;	
+    375  a848		       00		      byte.b	0	;	
+    376  a849		       00		      byte.b	0	;	
+    377  a84a		       00		      byte.b	0	;	
+    378  a84b		       00		      byte.b	0	;	
+    379  a84c		       00		      byte.b	0	;	
+    380  a84d		       00		      byte.b	0	;	
+    381  a84e		       00		      byte.b	0	;	
+    382  a84f		       00		      byte.b	0	;	
+    383  a850		       00		      byte.b	0	;	
+    384  a851		       00		      byte.b	0	;	
+    385  a852		       00		      byte.b	0	;	
+    386  a853		       00		      byte.b	0	;	
+    387  a854		       00		      byte.b	0	;	
+    388  a855		       00		      byte.b	0	;	
+    389  a856		       00		      byte.b	0	;	
+    390  a857		       00		      byte.b	0	;	
+    391  a858		       00		      byte.b	0	;	
+    392  a859		       00		      byte.b	0	;	
+    393  a85a		       00		      byte.b	0	;	
+    394  a85b		       00		      byte.b	0	;	
+    395  a85c		       00		      byte.b	0	;	
+    396  a85d		       00		      byte.b	0	;	
+    397  a85e		       00		      byte.b	0	;	
+    398  a85f		       00		      byte.b	0	;	
+    399  a860		       00		      byte.b	0	;	
+    400  a861		       00		      byte.b	0	;	
+    401  a862		       00		      byte.b	0	;	
+    402  a863		       00		      byte.b	0	;	
+    403  a864		       00		      byte.b	0	;	
+    404  a865		       00		      byte.b	0	;	
+    405  a866		       00		      byte.b	0	;	
+    406  a867		       00		      byte.b	0	;	
+    407  a868		       00		      byte.b	0	;	
+    408  a869		       00		      byte.b	0	;	
+    409  a86a		       00		      byte.b	0	;	
+    410  a86b		       00		      byte.b	0	;	
+    411  a86c		       00		      byte.b	0	;	
+    412  a86d		       00		      byte.b	0	;	
+    413  a86e		       00		      byte.b	0	;	
+    414  a86f		       00		      byte.b	0	;	
+    415  a870		       00		      byte.b	0	;	
+    416  a871		       00		      byte.b	0	;	
+    417  a872		       00		      byte.b	0	;	
+    418  a873		       00		      byte.b	0	;	
+    419  a874		       00		      byte.b	0	;	
+    420  a875		       00		      byte.b	0	;	
+    421  a876		       00		      byte.b	0	;	
+    422  a877		       00		      byte.b	0	;	
+    423  a878		       00		      byte.b	0	;	
+    424  a879		       00		      byte.b	0	;	
+    425  a87a		       00		      byte.b	0	;	
+    426  a87b		       00		      byte.b	0	;	
+    427  a87c		       00		      byte.b	0	;	
+    428  a87d		       00		      byte.b	0	;	
+    429  a87e		       00		      byte.b	0	;	
+    430  a87f		       00		      byte.b	0	;	
+    431  a880		       00		      byte.b	0	;	
+    432  a881		       00		      byte.b	0	;	
+    433  a882		       00		      byte.b	0	;	
+    434  a883		       00		      byte.b	0	;	
+    435  a884		       00		      byte.b	0	;	
+    436  a885		       00		      byte.b	0	;	
+    437  a886		       00		      byte.b	0	;	
+    438  a887		       00		      byte.b	0	;	
+    439  a888		       00		      byte.b	0	;	
+    440  a889		       00		      byte.b	0	;	
+    441  a88a		       00		      byte.b	0	;	
+    442  a88b		       00		      byte.b	0	;	
+    443  a88c		       00		      byte.b	0	;	
+    444  a88d		       00		      byte.b	0	;	
+    445  a88e		       00		      byte.b	0	;	
+    446  a88f		       00		      byte.b	0	;	
+    447  a890		       00		      byte.b	0	;	
+    448  a891		       00		      byte.b	0	;	
+    449  a892		       00		      byte.b	0	;	
+    450  a893		       00		      byte.b	0	;	
+    451  a894		       00		      byte.b	0	;	
+    452  a895		       00		      byte.b	0	;	
+    453  a896		       00		      byte.b	0	;	
+    454  a897		       00		      byte.b	0	;	
+    455  a898		       00		      byte.b	0	;	
+    456  a899		       00		      byte.b	0	;	
+    457  a89a		       00		      byte.b	0	;	
+    458  a89b		       00		      byte.b	0	;	
+    459  a89c		       00		      byte.b	0	;	
+    460  a89d		       00		      byte.b	0	;	
+    461  a89e		       00		      byte.b	0	;	
+    462  a89f		       00		      byte.b	0	;	
+    463  a8a0		       00		      byte.b	0	;	
+    464  a8a1		       00		      byte.b	0	;	
+    465  a8a2		       00		      byte.b	0	;	
+    466  a8a3		       00		      byte.b	0	;	
+    467  a8a4		       00		      byte.b	0	;	
+    468  a8a5		       00		      byte.b	0	;	
+    469  a8a6		       00		      byte.b	0	;	
+    470  a8a7		       00		      byte.b	0	;	
+    471  a8a8		       00		      byte.b	0	;	
+    472  a8a9		       00		      byte.b	0	;	
+    473  a8aa		       00		      byte.b	0	;	
+    474  a8ab		       00		      byte.b	0	;	
+    475  a8ac		       00		      byte.b	0	;	
+    476  a8ad		       00		      byte.b	0	;	
+------- FILE vicmidi.asm
+    824  a8ae				   setwaveorg
+------- FILE setwave.asm LEVEL 2 PASS 2
+      0  a8ae					      include	"setwave.asm"
+      1  a8ae							;A short generic routine for setting any shift register value for any pulse
+      2  a8ae							;channel in about 150 cpu clocks. Use it freely.
+      3  a8ae
+      4  a8ae							; USAGE: y = channel ($0a..$0c)
+      5  a8ae							;	  x = initial frequency
+      6  a8ae							;	  a = shift register contents
+      7  a8ae							;
+      8  a8ae							; WARNING for purists: self-modifying code, illegal opcodes.
+      9  a8ae							;
+     10  a8ae							; code align assertion: make sure that the loop is within a page.
+     11  a8ae							; oscillator assertion: make sure that the channel has been at $7e
+     12  a8ae							; for some time before calling this function.
+     13  a8ae							; put TMP and TMP2 in the zero page.
+     14  a8ae
+     15  a8ae		       8e d0 a8 	      stx	initfreq	; 4
+     16  a8b1
+     17  a8b1		       8c bf a8 	      sty	ch0	; 4
+     18  a8b4		       8c ca a8 	      sty	ch1	; 4
+     19  a8b7		       be ce a8 	      ldx	ldfqmasks-$a,y	; 4
+     20  a8ba		       85 57		      sta	TMP	; 3
+     21  a8bc
+     22  a8bc		       09 7f		      ora	#$7f	; 2
+     23  a8be
+     24  a8be		       8f 0c 90 	      .byte.b	$8f,$0C,$90	; axs $900c  ; 4  [$900c] = a AND x	     *ILLEGAL OPCODE*
+     25  a8c1
+     26  a8c1		       a8 bf	   ch0	      =	*-2
+     27  a8c1		       84 58		      sty	TMP2	; 3
+     28  a8c3		       a0 07		      ldy	#7	; 2
+     29  a8c5
+     30  a8c5				   l0
+     31  a8c5		       a9 7f		      lda	#$7f	; 2
+     32  a8c7		       07 57		      .byte.b	$07,TMP	; aso TMP		 ; 5  asl tmp; a = [tmp] OR $7f  *ILLEGAL OPCODE*
+     33  a8c9		       8f 0c 90 	      .byte.b	$8F,$0C,$90	; axs $900c	 ; 4  [$900c] = a AND x	  *ILLEGAL OPCODE*
+     34  a8c9		       a8 ca	   ch1	      =	*-2
+     35  a8cc		       88		      dey		; 2
+     36  a8cd		       d0 f6		      bne	l0	; 3
+     37  a8cf
+     38  a8cf		       a9 80		      lda	#128	; 2
+     39  a8cf		       a8 d0	   initfreq   =	*-1
+     40  a8d1		       ea		      nop		; 2
+     41  a8d2		       a4 58		      ldy	TMP2	; 3
+     42  a8d4				   noset
+     43  a8d4		       99 00 90 	      sta	$9000,y	; 5
+     44  a8d7
+     45  a8d7		       60		      rts		; 6	total clocks 11+4+3+2+16*7+16+6 eq 154
+     46  a8d8
+     47  a8d8				   ldfqmasks
+     48  a8d8		       fe		      .byte.b	$fe	; $900a - 1 x 16 clocks/bit
+     49  a8d9		       fd		      .byte.b	$fd	; $900b - 2 x	8 clocks/bit
+     50  a8da		       fb		      .byte.b	$fb	; $900c - 4 x	4 clocks/bit
+     51  a8db
+     52  a8db
+     53  a8db				   viznutwaveforms
+     54  a8db		       00		      .byte.b	0	; MIDI Program #1	default  0000000011111111
+     55  a8dc		       02		      .byte.b	2	; MIDI Program #2	"10"	 0000001011111101
+     56  a8dd		       04		      .byte.b	4	; MIDI Program #3	"100"	 0000010011111011
+     57  a8de		       06		      .byte.b	6	; MIDI Program #4	"110"	 0000011011111001
+     58  a8df		       08		      .byte.b	8	; MIDI Program #5	"1000"	 0000100011110111
+     59  a8e0		       0a		      .byte.b	10	; MIDI Program #6	"1010"	 0000101011110101
+     60  a8e1		       0b		      .byte.b	11	; MIDI Program #7	"1011"	 0000110011110011
+     61  a8e2		       0e		      .byte.b	14	; MIDI Program #8	"1110"	 0000111011110001
+     62  a8e3		       12		      .byte.b	18	; MIDI Program #9	"10010"  0001001011101101
+     63  a8e4		       14		      .byte.b	20	; MIDI Program #10	"10100"  0001010011101011
+     64  a8e5		       16		      .byte.b	22	; MIDI Program #11	"10110"  0001011011101001
+     65  a8e6		       18		      .byte.b	24	; MIDI Program #12	"11000"  0001100011100111
+     66  a8e7		       1a		      .byte.b	26	; MIDI Program #13	"11010"  0001101011100101
+     67  a8e8		       24		      .byte.b	36	; MIDI Program #14	"100100" 0010010011011011
+     68  a8e9		       2a		      .byte.b	42	; MIDI Program #15	"101010" 0010101011010101
+     69  a8ea		       2c		      .byte.b	44	; MIDI Program #16	"101100" 0010110011010011
+------- FILE vicmidi.asm
+    826  a8eb
+------- FILE lookup-ntsc.asm LEVEL 2 PASS 2
+      0  a8eb					      include	"lookup-ntsc.asm"
+      1  a8eb							; --------------------------------------------------------------------------------------------------
+      2  a8eb							; Note Lookups NTSC - 128 bytes each, map MIDI Note# to a VIC register value
+      3  a8eb							; From http://sleepingelephant.com/ipw-web/bulletin/bb/viewtopic.php?t=3643
+      4  a8eb
+      5  a8eb				   voice1lookup_ntsc
+      6  a8eb		       00		      byte.b	0
+      7  a8ec		       00		      byte.b	0
+      8  a8ed		       00		      byte.b	0
+      9  a8ee		       00		      byte.b	0
+     10  a8ef		       00		      byte.b	0
+     11  a8f0		       00		      byte.b	0
+     12  a8f1		       00		      byte.b	0
+     13  a8f2		       00		      byte.b	0
+     14  a8f3		       00		      byte.b	0
+     15  a8f4		       00		      byte.b	0
+     16  a8f5		       00		      byte.b	0
+     17  a8f6		       00		      byte.b	0
+     18  a8f7		       00		      byte.b	0
+     19  a8f8		       00		      byte.b	0
+     20  a8f9		       00		      byte.b	0
+     21  a8fa		       00		      byte.b	0
+     22  a8fb		       00		      byte.b	0
+     23  a8fc		       00		      byte.b	0
+     24  a8fd		       00		      byte.b	0
+     25  a8fe		       00		      byte.b	0
+     26  a8ff		       00		      byte.b	0
+     27  a900		       00		      byte.b	0
+     28  a901		       00		      byte.b	0
+     29  a902		       00		      byte.b	0
+     30  a903		       85		      byte.b	133
+     31  a904		       8c		      byte.b	140
+     32  a905		       92		      byte.b	146
+     33  a906		       98		      byte.b	152
+     34  a907		       9e		      byte.b	158
+     35  a908		       a3		      byte.b	163
+     36  a909		       a9		      byte.b	169
+     37  a90a		       ad		      byte.b	173
+     38  a90b		       b2		      byte.b	178
+     39  a90c		       b6		      byte.b	182
+     40  a90d		       ba		      byte.b	186
+     41  a90e		       be		      byte.b	190
+     42  a90f		       c2		      byte.b	194
+     43  a910		       c5		      byte.b	197
+     44  a911		       c9		      byte.b	201
+     45  a912		       cc		      byte.b	204
+     46  a913		       cf		      byte.b	207
+     47  a914		       d1		      byte.b	209
+     48  a915		       d4		      byte.b	212
+     49  a916		       d6		      byte.b	214
+     50  a917		       d9		      byte.b	217
+     51  a918		       db		      byte.b	219
+     52  a919		       dd		      byte.b	221
+     53  a91a		       df		      byte.b	223
+     54  a91b		       e0		      byte.b	224
+     55  a91c		       e2		      byte.b	226
+     56  a91d		       e4		      byte.b	228
+     57  a91e		       e5		      byte.b	229
+     58  a91f		       e7		      byte.b	231
+     59  a920		       e8		      byte.b	232
+     60  a921		       e9		      byte.b	233
+     61  a922		       eb		      byte.b	235
+     62  a923		       ec		      byte.b	236
+     63  a924		       ed		      byte.b	237
+     64  a925		       ee		      byte.b	238
+     65  a926		       ef		      byte.b	239
+     66  a927		       f0		      byte.b	240
+     67  a928		       00		      byte.b	0
+     68  a929		       00		      byte.b	0
+     69  a92a		       00		      byte.b	0
+     70  a92b		       00		      byte.b	0
+     71  a92c		       00		      byte.b	0
+     72  a92d		       00		      byte.b	0
+     73  a92e		       00		      byte.b	0
+     74  a92f		       00		      byte.b	0
+     75  a930		       00		      byte.b	0
+     76  a931		       00		      byte.b	0
+     77  a932		       00		      byte.b	0
+     78  a933		       00		      byte.b	0
+     79  a934		       00		      byte.b	0
+     80  a935		       00		      byte.b	0
+     81  a936		       00		      byte.b	0
+     82  a937		       00		      byte.b	0
+     83  a938		       00		      byte.b	0
+     84  a939		       00		      byte.b	0
+     85  a93a		       00		      byte.b	0
+     86  a93b		       00		      byte.b	0
+     87  a93c		       00		      byte.b	0
+     88  a93d		       00		      byte.b	0
+     89  a93e		       00		      byte.b	0
+     90  a93f		       00		      byte.b	0
+     91  a940		       00		      byte.b	0
+     92  a941		       00		      byte.b	0
+     93  a942		       00		      byte.b	0
+     94  a943		       00		      byte.b	0
+     95  a944		       00		      byte.b	0
+     96  a945		       00		      byte.b	0
+     97  a946		       00		      byte.b	0
+     98  a947		       00		      byte.b	0
+     99  a948		       00		      byte.b	0
+    100  a949		       00		      byte.b	0
+    101  a94a		       00		      byte.b	0
+    102  a94b		       00		      byte.b	0
+    103  a94c		       00		      byte.b	0
+    104  a94d		       00		      byte.b	0
+    105  a94e		       00		      byte.b	0
+    106  a94f		       00		      byte.b	0
+    107  a950		       00		      byte.b	0
+    108  a951		       00		      byte.b	0
+    109  a952		       00		      byte.b	0
+    110  a953		       00		      byte.b	0
+    111  a954		       00		      byte.b	0
+    112  a955		       00		      byte.b	0
+    113  a956		       00		      byte.b	0
+    114  a957		       00		      byte.b	0
+    115  a958		       00		      byte.b	0
+    116  a959		       00		      byte.b	0
+    117  a95a		       00		      byte.b	0
+    118  a95b		       00		      byte.b	0
+    119  a95c		       00		      byte.b	0
+    120  a95d		       00		      byte.b	0
+    121  a95e		       00		      byte.b	0
+    122  a95f		       00		      byte.b	0
+    123  a960		       00		      byte.b	0
+    124  a961		       00		      byte.b	0
+    125  a962		       00		      byte.b	0
+    126  a963		       00		      byte.b	0
+    127  a964		       00		      byte.b	0
+    128  a965		       00		      byte.b	0
+    129  a966		       00		      byte.b	0
+    130  a967		       00		      byte.b	0
+    131  a968		       00		      byte.b	0
+    132  a969		       00		      byte.b	0
+    133  a96a		       00		      byte.b	0
+    134  a96b
+    135  a96b				   voice2lookup_ntsc
+    136  a96b		       00		      byte.b	0
+    137  a96c		       00		      byte.b	0
+    138  a96d		       00		      byte.b	0
+    139  a96e		       00		      byte.b	0
+    140  a96f		       00		      byte.b	0
+    141  a970		       00		      byte.b	0
+    142  a971		       00		      byte.b	0
+    143  a972		       00		      byte.b	0
+    144  a973		       00		      byte.b	0
+    145  a974		       00		      byte.b	0
+    146  a975		       00		      byte.b	0
+    147  a976		       00		      byte.b	0
+    148  a977		       00		      byte.b	0
+    149  a978		       00		      byte.b	0
+    150  a979		       00		      byte.b	0
+    151  a97a		       00		      byte.b	0
+    152  a97b		       00		      byte.b	0
+    153  a97c		       00		      byte.b	0
+    154  a97d		       00		      byte.b	0
+    155  a97e		       00		      byte.b	0
+    156  a97f		       00		      byte.b	0
+    157  a980		       00		      byte.b	0
+    158  a981		       00		      byte.b	0
+    159  a982		       00		      byte.b	0
+    160  a983		       00		      byte.b	0
+    161  a984		       00		      byte.b	0
+    162  a985		       00		      byte.b	0
+    163  a986		       00		      byte.b	0
+    164  a987		       00		      byte.b	0
+    165  a988		       00		      byte.b	0
+    166  a989		       00		      byte.b	0
+    167  a98a		       00		      byte.b	0
+    168  a98b		       00		      byte.b	0
+    169  a98c		       00		      byte.b	0
+    170  a98d		       00		      byte.b	0
+    171  a98e		       00		      byte.b	0
+    172  a98f		       85		      byte.b	133
+    173  a990		       8c		      byte.b	140
+    174  a991		       92		      byte.b	146
+    175  a992		       98		      byte.b	152
+    176  a993		       9e		      byte.b	158
+    177  a994		       a3		      byte.b	163
+    178  a995		       a9		      byte.b	169
+    179  a996		       ad		      byte.b	173
+    180  a997		       b2		      byte.b	178
+    181  a998		       b6		      byte.b	182
+    182  a999		       ba		      byte.b	186
+    183  a99a		       be		      byte.b	190
+    184  a99b		       c2		      byte.b	194
+    185  a99c		       c5		      byte.b	197
+    186  a99d		       c9		      byte.b	201
+    187  a99e		       cc		      byte.b	204
+    188  a99f		       cf		      byte.b	207
+    189  a9a0		       d1		      byte.b	209
+    190  a9a1		       d4		      byte.b	212
+    191  a9a2		       d6		      byte.b	214
+    192  a9a3		       d9		      byte.b	217
+    193  a9a4		       db		      byte.b	219
+    194  a9a5		       dd		      byte.b	221
+    195  a9a6		       df		      byte.b	223
+    196  a9a7		       e0		      byte.b	224
+    197  a9a8		       e2		      byte.b	226
+    198  a9a9		       e4		      byte.b	228
+    199  a9aa		       e5		      byte.b	229
+    200  a9ab		       e7		      byte.b	231
+    201  a9ac		       e8		      byte.b	232
+    202  a9ad		       e9		      byte.b	233
+    203  a9ae		       eb		      byte.b	235
+    204  a9af		       ec		      byte.b	236
+    205  a9b0		       ed		      byte.b	237
+    206  a9b1		       ee		      byte.b	238
+    207  a9b2		       ef		      byte.b	239
+    208  a9b3		       f0		      byte.b	240
+    209  a9b4		       00		      byte.b	0
+    210  a9b5		       00		      byte.b	0
+    211  a9b6		       00		      byte.b	0
+    212  a9b7		       00		      byte.b	0
+    213  a9b8		       00		      byte.b	0
+    214  a9b9		       00		      byte.b	0
+    215  a9ba		       00		      byte.b	0
+    216  a9bb		       00		      byte.b	0
+    217  a9bc		       00		      byte.b	0
+    218  a9bd		       00		      byte.b	0
+    219  a9be		       00		      byte.b	0
+    220  a9bf		       00		      byte.b	0
+    221  a9c0		       00		      byte.b	0
+    222  a9c1		       00		      byte.b	0
+    223  a9c2		       00		      byte.b	0
+    224  a9c3		       00		      byte.b	0
+    225  a9c4		       00		      byte.b	0
+    226  a9c5		       00		      byte.b	0
+    227  a9c6		       00		      byte.b	0
+    228  a9c7		       00		      byte.b	0
+    229  a9c8		       00		      byte.b	0
+    230  a9c9		       00		      byte.b	0
+    231  a9ca		       00		      byte.b	0
+    232  a9cb		       00		      byte.b	0
+    233  a9cc		       00		      byte.b	0
+    234  a9cd		       00		      byte.b	0
+    235  a9ce		       00		      byte.b	0
+    236  a9cf		       00		      byte.b	0
+    237  a9d0		       00		      byte.b	0
+    238  a9d1		       00		      byte.b	0
+    239  a9d2		       00		      byte.b	0
+    240  a9d3		       00		      byte.b	0
+    241  a9d4		       00		      byte.b	0
+    242  a9d5		       00		      byte.b	0
+    243  a9d6		       00		      byte.b	0
+    244  a9d7		       00		      byte.b	0
+    245  a9d8		       00		      byte.b	0
+    246  a9d9		       00		      byte.b	0
+    247  a9da		       00		      byte.b	0
+    248  a9db		       00		      byte.b	0
+    249  a9dc		       00		      byte.b	0
+    250  a9dd		       00		      byte.b	0
+    251  a9de		       00		      byte.b	0
+    252  a9df		       00		      byte.b	0
+    253  a9e0		       00		      byte.b	0
+    254  a9e1		       00		      byte.b	0
+    255  a9e2		       00		      byte.b	0
+    256  a9e3		       00		      byte.b	0
+    257  a9e4		       00		      byte.b	0
+    258  a9e5		       00		      byte.b	0
+    259  a9e6		       00		      byte.b	0
+    260  a9e7		       00		      byte.b	0
+    261  a9e8		       00		      byte.b	0
+    262  a9e9		       00		      byte.b	0
+    263  a9ea		       00		      byte.b	0
+    264  a9eb
+    265  a9eb				   voice3lookup_ntsc
+    266  a9eb		       00		      byte.b	0
+    267  a9ec		       00		      byte.b	0
+    268  a9ed		       00		      byte.b	0
+    269  a9ee		       00		      byte.b	0
+    270  a9ef		       00		      byte.b	0
+    271  a9f0		       00		      byte.b	0
+    272  a9f1		       00		      byte.b	0
+    273  a9f2		       00		      byte.b	0
+    274  a9f3		       00		      byte.b	0
+    275  a9f4		       00		      byte.b	0
+    276  a9f5		       00		      byte.b	0
+    277  a9f6		       00		      byte.b	0
+    278  a9f7		       00		      byte.b	0
+    279  a9f8		       00		      byte.b	0
+    280  a9f9		       00		      byte.b	0
+    281  a9fa		       00		      byte.b	0
+    282  a9fb		       00		      byte.b	0
+    283  a9fc		       00		      byte.b	0
+    284  a9fd		       00		      byte.b	0
+    285  a9fe		       00		      byte.b	0
+    286  a9ff		       00		      byte.b	0
+    287  aa00		       00		      byte.b	0
+    288  aa01		       00		      byte.b	0
+    289  aa02		       00		      byte.b	0
+    290  aa03		       00		      byte.b	0
+    291  aa04		       00		      byte.b	0
+    292  aa05		       00		      byte.b	0
+    293  aa06		       00		      byte.b	0
+    294  aa07		       00		      byte.b	0
+    295  aa08		       00		      byte.b	0
+    296  aa09		       00		      byte.b	0
+    297  aa0a		       00		      byte.b	0
+    298  aa0b		       00		      byte.b	0
+    299  aa0c		       00		      byte.b	0
+    300  aa0d		       00		      byte.b	0
+    301  aa0e		       00		      byte.b	0
+    302  aa0f		       00		      byte.b	0
+    303  aa10		       00		      byte.b	0
+    304  aa11		       00		      byte.b	0
+    305  aa12		       00		      byte.b	0
+    306  aa13		       00		      byte.b	0
+    307  aa14		       00		      byte.b	0
+    308  aa15		       00		      byte.b	0
+    309  aa16		       00		      byte.b	0
+    310  aa17		       00		      byte.b	0
+    311  aa18		       00		      byte.b	0
+    312  aa19		       00		      byte.b	0
+    313  aa1a		       00		      byte.b	0
+    314  aa1b		       85		      byte.b	133
+    315  aa1c		       8c		      byte.b	140
+    316  aa1d		       92		      byte.b	146
+    317  aa1e		       98		      byte.b	152
+    318  aa1f		       9e		      byte.b	158
+    319  aa20		       a3		      byte.b	163
+    320  aa21		       a9		      byte.b	169
+    321  aa22		       ad		      byte.b	173
+    322  aa23		       b2		      byte.b	178
+    323  aa24		       b6		      byte.b	182
+    324  aa25		       ba		      byte.b	186
+    325  aa26		       be		      byte.b	190
+    326  aa27		       c2		      byte.b	194
+    327  aa28		       c5		      byte.b	197
+    328  aa29		       c9		      byte.b	201
+    329  aa2a		       cc		      byte.b	204
+    330  aa2b		       cf		      byte.b	207
+    331  aa2c		       d1		      byte.b	209
+    332  aa2d		       d4		      byte.b	212
+    333  aa2e		       d6		      byte.b	214
+    334  aa2f		       d9		      byte.b	217
+    335  aa30		       db		      byte.b	219
+    336  aa31		       dd		      byte.b	221
+    337  aa32		       df		      byte.b	223
+    338  aa33		       e0		      byte.b	224
+    339  aa34		       e2		      byte.b	226
+    340  aa35		       e4		      byte.b	228
+    341  aa36		       e5		      byte.b	229
+    342  aa37		       e7		      byte.b	231
+    343  aa38		       e8		      byte.b	232
+    344  aa39		       e9		      byte.b	233
+    345  aa3a		       eb		      byte.b	235
+    346  aa3b		       ec		      byte.b	236
+    347  aa3c		       ed		      byte.b	237
+    348  aa3d		       ee		      byte.b	238
+    349  aa3e		       ef		      byte.b	239
+    350  aa3f		       f0		      byte.b	240
+    351  aa40		       00		      byte.b	0
+    352  aa41		       00		      byte.b	0
+    353  aa42		       00		      byte.b	0
+    354  aa43		       00		      byte.b	0
+    355  aa44		       00		      byte.b	0
+    356  aa45		       00		      byte.b	0
+    357  aa46		       00		      byte.b	0
+    358  aa47		       00		      byte.b	0
+    359  aa48		       00		      byte.b	0
+    360  aa49		       00		      byte.b	0
+    361  aa4a		       00		      byte.b	0
+    362  aa4b		       00		      byte.b	0
+    363  aa4c		       00		      byte.b	0
+    364  aa4d		       00		      byte.b	0
+    365  aa4e		       00		      byte.b	0
+    366  aa4f		       00		      byte.b	0
+    367  aa50		       00		      byte.b	0
+    368  aa51		       00		      byte.b	0
+    369  aa52		       00		      byte.b	0
+    370  aa53		       00		      byte.b	0
+    371  aa54		       00		      byte.b	0
+    372  aa55		       00		      byte.b	0
+    373  aa56		       00		      byte.b	0
+    374  aa57		       00		      byte.b	0
+    375  aa58		       00		      byte.b	0
+    376  aa59		       00		      byte.b	0
+    377  aa5a		       00		      byte.b	0
+    378  aa5b		       00		      byte.b	0
+    379  aa5c		       00		      byte.b	0
+    380  aa5d		       00		      byte.b	0
+    381  aa5e		       00		      byte.b	0
+    382  aa5f		       00		      byte.b	0
+    383  aa60		       00		      byte.b	0
+    384  aa61		       00		      byte.b	0
+    385  aa62		       00		      byte.b	0
+    386  aa63		       00		      byte.b	0
+    387  aa64		       00		      byte.b	0
+    388  aa65		       00		      byte.b	0
+    389  aa66		       00		      byte.b	0
+    390  aa67		       00		      byte.b	0
+    391  aa68		       00		      byte.b	0
+    392  aa69		       00		      byte.b	0
+    393  aa6a		       00		      byte.b	0
+    394  aa6b
+    395  aa6b
+    396  aa6b				   voice4lookup_ntsc
+    397  aa6b		       00		      byte.b	0
+    398  aa6c		       00		      byte.b	0
+    399  aa6d		       00		      byte.b	0
+    400  aa6e		       00		      byte.b	0
+    401  aa6f		       00		      byte.b	0
+    402  aa70		       00		      byte.b	0
+    403  aa71		       00		      byte.b	0
+    404  aa72		       00		      byte.b	0
+    405  aa73		       00		      byte.b	0
+    406  aa74		       00		      byte.b	0
+    407  aa75		       00		      byte.b	0
+    408  aa76		       00		      byte.b	0
+    409  aa77		       00		      byte.b	0
+    410  aa78		       00		      byte.b	0
+    411  aa79		       00		      byte.b	0
+    412  aa7a		       00		      byte.b	0
+    413  aa7b		       00		      byte.b	0
+    414  aa7c		       00		      byte.b	0
+    415  aa7d		       00		      byte.b	0
+    416  aa7e		       00		      byte.b	0
+    417  aa7f		       00		      byte.b	0
+    418  aa80		       00		      byte.b	0
+    419  aa81		       00		      byte.b	0
+    420  aa82		       00		      byte.b	0
+    421  aa83		       00		      byte.b	0
+    422  aa84		       00		      byte.b	0
+    423  aa85		       00		      byte.b	0
+    424  aa86		       00		      byte.b	0
+    425  aa87		       00		      byte.b	0
+    426  aa88		       00		      byte.b	0
+    427  aa89		       00		      byte.b	0
+    428  aa8a		       00		      byte.b	0
+    429  aa8b		       00		      byte.b	0
+    430  aa8c		       00		      byte.b	0
+    431  aa8d		       00		      byte.b	0
+    432  aa8e		       00		      byte.b	0
+    433  aa8f		       85		      byte.b	133
+    434  aa90		       8c		      byte.b	140
+    435  aa91		       92		      byte.b	146
+    436  aa92		       98		      byte.b	152
+    437  aa93		       9e		      byte.b	158
+    438  aa94		       a3		      byte.b	163
+    439  aa95		       a9		      byte.b	169
+    440  aa96		       ad		      byte.b	173
+    441  aa97		       b2		      byte.b	178
+    442  aa98		       b6		      byte.b	182
+    443  aa99		       ba		      byte.b	186
+    444  aa9a		       be		      byte.b	190
+    445  aa9b		       c2		      byte.b	194
+    446  aa9c		       c5		      byte.b	197
+    447  aa9d		       c9		      byte.b	201
+    448  aa9e		       cc		      byte.b	204
+    449  aa9f		       cf		      byte.b	207
+    450  aaa0		       d1		      byte.b	209
+    451  aaa1		       d4		      byte.b	212
+    452  aaa2		       d6		      byte.b	214
+    453  aaa3		       d9		      byte.b	217
+    454  aaa4		       db		      byte.b	219
+    455  aaa5		       dd		      byte.b	221
+    456  aaa6		       df		      byte.b	223
+    457  aaa7		       e0		      byte.b	224
+    458  aaa8		       e2		      byte.b	226
+    459  aaa9		       e4		      byte.b	228
+    460  aaaa		       e5		      byte.b	229
+    461  aaab		       e7		      byte.b	231
+    462  aaac		       e8		      byte.b	232
+    463  aaad		       e9		      byte.b	233
+    464  aaae		       eb		      byte.b	235
+    465  aaaf		       ec		      byte.b	236
+    466  aab0		       ed		      byte.b	237
+    467  aab1		       ee		      byte.b	238
+    468  aab2		       ef		      byte.b	239
+    469  aab3		       f0		      byte.b	240
+    470  aab4		       00		      byte.b	0
+    471  aab5		       00		      byte.b	0
+    472  aab6		       00		      byte.b	0
+    473  aab7		       00		      byte.b	0
+    474  aab8		       00		      byte.b	0
+    475  aab9		       00		      byte.b	0
+    476  aaba		       00		      byte.b	0
+    477  aabb		       00		      byte.b	0
+    478  aabc		       00		      byte.b	0
+    479  aabd		       00		      byte.b	0
+    480  aabe		       00		      byte.b	0
+    481  aabf		       00		      byte.b	0
+    482  aac0		       00		      byte.b	0
+    483  aac1		       00		      byte.b	0
+    484  aac2		       00		      byte.b	0
+    485  aac3		       00		      byte.b	0
+    486  aac4		       00		      byte.b	0
+    487  aac5		       00		      byte.b	0
+    488  aac6		       00		      byte.b	0
+    489  aac7		       00		      byte.b	0
+    490  aac8		       00		      byte.b	0
+    491  aac9		       00		      byte.b	0
+    492  aaca		       00		      byte.b	0
+    493  aacb		       00		      byte.b	0
+    494  aacc		       00		      byte.b	0
+    495  aacd		       00		      byte.b	0
+    496  aace		       00		      byte.b	0
+    497  aacf		       00		      byte.b	0
+    498  aad0		       00		      byte.b	0
+    499  aad1		       00		      byte.b	0
+    500  aad2		       00		      byte.b	0
+    501  aad3		       00		      byte.b	0
+    502  aad4		       00		      byte.b	0
+    503  aad5		       00		      byte.b	0
+    504  aad6		       00		      byte.b	0
+    505  aad7		       00		      byte.b	0
+    506  aad8		       00		      byte.b	0
+    507  aad9		       00		      byte.b	0
+    508  aada		       00		      byte.b	0
+    509  aadb		       00		      byte.b	0
+    510  aadc		       00		      byte.b	0
+    511  aadd		       00		      byte.b	0
+    512  aade		       00		      byte.b	0
+    513  aadf		       00		      byte.b	0
+    514  aae0		       00		      byte.b	0
+    515  aae1		       00		      byte.b	0
+    516  aae2		       00		      byte.b	0
+    517  aae3		       00		      byte.b	0
+    518  aae4		       00		      byte.b	0
+    519  aae5		       00		      byte.b	0
+    520  aae6		       00		      byte.b	0
+    521  aae7		       00		      byte.b	0
+    522  aae8		       00		      byte.b	0
+    523  aae9		       00		      byte.b	0
+    524  aaea		       00		      byte.b	0
+    525  aaeb
+    526  aaeb							; EOF!
+------- FILE vicmidi.asm
+------- FILE lookup-pal.asm LEVEL 2 PASS 2
+      0  aaeb					      include	"lookup-pal.asm"
+      1  aaeb							; --------------------------------------------------------------------------------------------------
+      2  aaeb							; Note Lookups PAL - 128 bytes each, map MIDI Note# to a VIC register value
+      3  aaeb							; From http://sleepingelephant.com/ipw-web/bulletin/bb/viewtopic.php?t=3643
+      4  aaeb
+      5  aaeb				   voice1lookup_pal
+      6  aaeb		       00		      byte.b	0
+      7  aaec		       00		      byte.b	0
+      8  aaed		       00		      byte.b	0
+      9  aaee		       00		      byte.b	0
+     10  aaef		       00		      byte.b	0
+     11  aaf0		       00		      byte.b	0
+     12  aaf1		       00		      byte.b	0
+     13  aaf2		       00		      byte.b	0
+     14  aaf3		       00		      byte.b	0
+     15  aaf4		       00		      byte.b	0
+     16  aaf5		       00		      byte.b	0
+     17  aaf6		       00		      byte.b	0
+     18  aaf7		       00		      byte.b	0
+     19  aaf8		       00		      byte.b	0
+     20  aaf9		       00		      byte.b	0
+     21  aafa		       00		      byte.b	0
+     22  aafb		       00		      byte.b	0
+     23  aafc		       00		      byte.b	0
+     24  aafd		       00		      byte.b	0
+     25  aafe		       00		      byte.b	0
+     26  aaff		       00		      byte.b	0
+     27  ab00		       00		      byte.b	0
+     28  ab01		       00		      byte.b	0
+     29  ab02		       00		      byte.b	0
+     30  ab03		       7b		      byte.b	123	; (122.60)  <- not reachable in PAL
+     31  ab04		       82		      byte.b	130
+     32  ab05		       89		      byte.b	137
+     33  ab06		       90		      byte.b	144
+     34  ab07		       96		      byte.b	150
+     35  ab08		       9c		      byte.b	156
+     36  ab09		       a1		      byte.b	161
+     37  ab0a		       a7		      byte.b	167
+     38  ab0b		       ac		      byte.b	172
+     39  ab0c		       b0		      byte.b	176
+     40  ab0d		       b5		      byte.b	181
+     41  ab0e		       b9		      byte.b	185
+     42  ab0f		       bd		      byte.b	189
+     43  ab10		       c1		      byte.b	193
+     44  ab11		       c4		      byte.b	196
+     45  ab12		       c7		      byte.b	199
+     46  ab13		       ca		      byte.b	202
+     47  ab14		       cd		      byte.b	205
+     48  ab15		       d0		      byte.b	208
+     49  ab16		       d3		      byte.b	211
+     50  ab17		       d5		      byte.b	213
+     51  ab18		       d8		      byte.b	216
+     52  ab19		       da		      byte.b	218
+     53  ab1a		       dc		      byte.b	220
+     54  ab1b		       de		      byte.b	222
+     55  ab1c		       e0		      byte.b	224
+     56  ab1d		       e2		      byte.b	226
+     57  ab1e		       e3		      byte.b	227
+     58  ab1f		       e5		      byte.b	229
+     59  ab20		       e6		      byte.b	230
+     60  ab21		       e8		      byte.b	232
+     61  ab22		       e9		      byte.b	233
+     62  ab23		       ea		      byte.b	234
+     63  ab24		       eb		      byte.b	235
+     64  ab25		       ec		      byte.b	236
+     65  ab26		       ed		      byte.b	237
+     66  ab27		       ee		      byte.b	238
+     67  ab28		       00		      byte.b	0
+     68  ab29		       00		      byte.b	0
+     69  ab2a		       00		      byte.b	0
+     70  ab2b		       00		      byte.b	0
+     71  ab2c		       00		      byte.b	0
+     72  ab2d		       00		      byte.b	0
+     73  ab2e		       00		      byte.b	0
+     74  ab2f		       00		      byte.b	0
+     75  ab30		       00		      byte.b	0
+     76  ab31		       00		      byte.b	0
+     77  ab32		       00		      byte.b	0
+     78  ab33		       00		      byte.b	0
+     79  ab34		       00		      byte.b	0
+     80  ab35		       00		      byte.b	0
+     81  ab36		       00		      byte.b	0
+     82  ab37		       00		      byte.b	0
+     83  ab38		       00		      byte.b	0
+     84  ab39		       00		      byte.b	0
+     85  ab3a		       00		      byte.b	0
+     86  ab3b		       00		      byte.b	0
+     87  ab3c		       00		      byte.b	0
+     88  ab3d		       00		      byte.b	0
+     89  ab3e		       00		      byte.b	0
+     90  ab3f		       00		      byte.b	0
+     91  ab40		       00		      byte.b	0
+     92  ab41		       00		      byte.b	0
+     93  ab42		       00		      byte.b	0
+     94  ab43		       00		      byte.b	0
+     95  ab44		       00		      byte.b	0
+     96  ab45		       00		      byte.b	0
+     97  ab46		       00		      byte.b	0
+     98  ab47		       00		      byte.b	0
+     99  ab48		       00		      byte.b	0
+    100  ab49		       00		      byte.b	0
+    101  ab4a		       00		      byte.b	0
+    102  ab4b		       00		      byte.b	0
+    103  ab4c		       00		      byte.b	0
+    104  ab4d		       00		      byte.b	0
+    105  ab4e		       00		      byte.b	0
+    106  ab4f		       00		      byte.b	0
+    107  ab50		       00		      byte.b	0
+    108  ab51		       00		      byte.b	0
+    109  ab52		       00		      byte.b	0
+    110  ab53		       00		      byte.b	0
+    111  ab54		       00		      byte.b	0
+    112  ab55		       00		      byte.b	0
+    113  ab56		       00		      byte.b	0
+    114  ab57		       00		      byte.b	0
+    115  ab58		       00		      byte.b	0
+    116  ab59		       00		      byte.b	0
+    117  ab5a		       00		      byte.b	0
+    118  ab5b		       00		      byte.b	0
+    119  ab5c		       00		      byte.b	0
+    120  ab5d		       00		      byte.b	0
+    121  ab5e		       00		      byte.b	0
+    122  ab5f		       00		      byte.b	0
+    123  ab60		       00		      byte.b	0
+    124  ab61		       00		      byte.b	0
+    125  ab62		       00		      byte.b	0
+    126  ab63		       00		      byte.b	0
+    127  ab64		       00		      byte.b	0
+    128  ab65		       00		      byte.b	0
+    129  ab66		       00		      byte.b	0
+    130  ab67		       00		      byte.b	0
+    131  ab68		       00		      byte.b	0
+    132  ab69		       00		      byte.b	0
+    133  ab6a		       00		      byte.b	0
+    134  ab6b
+    135  ab6b				   voice2lookup_pal
+    136  ab6b		       00		      byte.b	0
+    137  ab6c		       00		      byte.b	0
+    138  ab6d		       00		      byte.b	0
+    139  ab6e		       00		      byte.b	0
+    140  ab6f		       00		      byte.b	0
+    141  ab70		       00		      byte.b	0
+    142  ab71		       00		      byte.b	0
+    143  ab72		       00		      byte.b	0
+    144  ab73		       00		      byte.b	0
+    145  ab74		       00		      byte.b	0
+    146  ab75		       00		      byte.b	0
+    147  ab76		       00		      byte.b	0
+    148  ab77		       00		      byte.b	0
+    149  ab78		       00		      byte.b	0
+    150  ab79		       00		      byte.b	0
+    151  ab7a		       00		      byte.b	0
+    152  ab7b		       00		      byte.b	0
+    153  ab7c		       00		      byte.b	0
+    154  ab7d		       00		      byte.b	0
+    155  ab7e		       00		      byte.b	0
+    156  ab7f		       00		      byte.b	0
+    157  ab80		       00		      byte.b	0
+    158  ab81		       00		      byte.b	0
+    159  ab82		       00		      byte.b	0
+    160  ab83		       00		      byte.b	0
+    161  ab84		       00		      byte.b	0
+    162  ab85		       00		      byte.b	0
+    163  ab86		       00		      byte.b	0
+    164  ab87		       00		      byte.b	0
+    165  ab88		       00		      byte.b	0
+    166  ab89		       00		      byte.b	0
+    167  ab8a		       00		      byte.b	0
+    168  ab8b		       00		      byte.b	0
+    169  ab8c		       00		      byte.b	0
+    170  ab8d		       00		      byte.b	0
+    171  ab8e		       00		      byte.b	0
+    172  ab8f		       7b		      byte.b	123	; (122.60)  <- not reachable in PAL
+    173  ab90		       82		      byte.b	130
+    174  ab91		       89		      byte.b	137
+    175  ab92		       90		      byte.b	144
+    176  ab93		       96		      byte.b	150
+    177  ab94		       9c		      byte.b	156
+    178  ab95		       a1		      byte.b	161
+    179  ab96		       a7		      byte.b	167
+    180  ab97		       ac		      byte.b	172
+    181  ab98		       b0		      byte.b	176
+    182  ab99		       b5		      byte.b	181
+    183  ab9a		       b9		      byte.b	185
+    184  ab9b		       bd		      byte.b	189
+    185  ab9c		       c1		      byte.b	193
+    186  ab9d		       c4		      byte.b	196
+    187  ab9e		       c7		      byte.b	199
+    188  ab9f		       ca		      byte.b	202
+    189  aba0		       cd		      byte.b	205
+    190  aba1		       d0		      byte.b	208
+    191  aba2		       d3		      byte.b	211
+    192  aba3		       d5		      byte.b	213
+    193  aba4		       d8		      byte.b	216
+    194  aba5		       da		      byte.b	218
+    195  aba6		       dc		      byte.b	220
+    196  aba7		       de		      byte.b	222
+    197  aba8		       e0		      byte.b	224
+    198  aba9		       e2		      byte.b	226
+    199  abaa		       e3		      byte.b	227
+    200  abab		       e5		      byte.b	229
+    201  abac		       e6		      byte.b	230
+    202  abad		       e8		      byte.b	232
+    203  abae		       e9		      byte.b	233
+    204  abaf		       ea		      byte.b	234
+    205  abb0		       eb		      byte.b	235
+    206  abb1		       ec		      byte.b	236
+    207  abb2		       ed		      byte.b	237
+    208  abb3		       ee		      byte.b	238
+    209  abb4		       00		      byte.b	0
+    210  abb5		       00		      byte.b	0
+    211  abb6		       00		      byte.b	0
+    212  abb7		       00		      byte.b	0
+    213  abb8		       00		      byte.b	0
+    214  abb9		       00		      byte.b	0
+    215  abba		       00		      byte.b	0
+    216  abbb		       00		      byte.b	0
+    217  abbc		       00		      byte.b	0
+    218  abbd		       00		      byte.b	0
+    219  abbe		       00		      byte.b	0
+    220  abbf		       00		      byte.b	0
+    221  abc0		       00		      byte.b	0
+    222  abc1		       00		      byte.b	0
+    223  abc2		       00		      byte.b	0
+    224  abc3		       00		      byte.b	0
+    225  abc4		       00		      byte.b	0
+    226  abc5		       00		      byte.b	0
+    227  abc6		       00		      byte.b	0
+    228  abc7		       00		      byte.b	0
+    229  abc8		       00		      byte.b	0
+    230  abc9		       00		      byte.b	0
+    231  abca		       00		      byte.b	0
+    232  abcb		       00		      byte.b	0
+    233  abcc		       00		      byte.b	0
+    234  abcd		       00		      byte.b	0
+    235  abce		       00		      byte.b	0
+    236  abcf		       00		      byte.b	0
+    237  abd0		       00		      byte.b	0
+    238  abd1		       00		      byte.b	0
+    239  abd2		       00		      byte.b	0
+    240  abd3		       00		      byte.b	0
+    241  abd4		       00		      byte.b	0
+    242  abd5		       00		      byte.b	0
+    243  abd6		       00		      byte.b	0
+    244  abd7		       00		      byte.b	0
+    245  abd8		       00		      byte.b	0
+    246  abd9		       00		      byte.b	0
+    247  abda		       00		      byte.b	0
+    248  abdb		       00		      byte.b	0
+    249  abdc		       00		      byte.b	0
+    250  abdd		       00		      byte.b	0
+    251  abde		       00		      byte.b	0
+    252  abdf		       00		      byte.b	0
+    253  abe0		       00		      byte.b	0
+    254  abe1		       00		      byte.b	0
+    255  abe2		       00		      byte.b	0
+    256  abe3		       00		      byte.b	0
+    257  abe4		       00		      byte.b	0
+    258  abe5		       00		      byte.b	0
+    259  abe6		       00		      byte.b	0
+    260  abe7		       00		      byte.b	0
+    261  abe8		       00		      byte.b	0
+    262  abe9		       00		      byte.b	0
+    263  abea		       00		      byte.b	0
+    264  abeb
+    265  abeb				   voice3lookup_pal
+    266  abeb		       00		      byte.b	0
+    267  abec		       00		      byte.b	0
+    268  abed		       00		      byte.b	0
+    269  abee		       00		      byte.b	0
+    270  abef		       00		      byte.b	0
+    271  abf0		       00		      byte.b	0
+    272  abf1		       00		      byte.b	0
+    273  abf2		       00		      byte.b	0
+    274  abf3		       00		      byte.b	0
+    275  abf4		       00		      byte.b	0
+    276  abf5		       00		      byte.b	0
+    277  abf6		       00		      byte.b	0
+    278  abf7		       00		      byte.b	0
+    279  abf8		       00		      byte.b	0
+    280  abf9		       00		      byte.b	0
+    281  abfa		       00		      byte.b	0
+    282  abfb		       00		      byte.b	0
+    283  abfc		       00		      byte.b	0
+    284  abfd		       00		      byte.b	0
+    285  abfe		       00		      byte.b	0
+    286  abff		       00		      byte.b	0
+    287  ac00		       00		      byte.b	0
+    288  ac01		       00		      byte.b	0
+    289  ac02		       00		      byte.b	0
+    290  ac03		       00		      byte.b	0
+    291  ac04		       00		      byte.b	0
+    292  ac05		       00		      byte.b	0
+    293  ac06		       00		      byte.b	0
+    294  ac07		       00		      byte.b	0
+    295  ac08		       00		      byte.b	0
+    296  ac09		       00		      byte.b	0
+    297  ac0a		       00		      byte.b	0
+    298  ac0b		       00		      byte.b	0
+    299  ac0c		       00		      byte.b	0
+    300  ac0d		       00		      byte.b	0
+    301  ac0e		       00		      byte.b	0
+    302  ac0f		       00		      byte.b	0
+    303  ac10		       00		      byte.b	0
+    304  ac11		       00		      byte.b	0
+    305  ac12		       00		      byte.b	0
+    306  ac13		       00		      byte.b	0
+    307  ac14		       00		      byte.b	0
+    308  ac15		       00		      byte.b	0
+    309  ac16		       00		      byte.b	0
+    310  ac17		       00		      byte.b	0
+    311  ac18		       00		      byte.b	0
+    312  ac19		       00		      byte.b	0
+    313  ac1a		       00		      byte.b	0
+    314  ac1b		       7b		      byte.b	123	; (122.60)  <- not reachable in PAL
+    315  ac1c		       82		      byte.b	130
+    316  ac1d		       89		      byte.b	137
+    317  ac1e		       90		      byte.b	144
+    318  ac1f		       96		      byte.b	150
+    319  ac20		       9c		      byte.b	156
+    320  ac21		       a1		      byte.b	161
+    321  ac22		       a7		      byte.b	167
+    322  ac23		       ac		      byte.b	172
+    323  ac24		       b0		      byte.b	176
+    324  ac25		       b5		      byte.b	181
+    325  ac26		       b9		      byte.b	185
+    326  ac27		       bd		      byte.b	189
+    327  ac28		       c1		      byte.b	193
+    328  ac29		       c4		      byte.b	196
+    329  ac2a		       c7		      byte.b	199
+    330  ac2b		       ca		      byte.b	202
+    331  ac2c		       cd		      byte.b	205
+    332  ac2d		       d0		      byte.b	208
+    333  ac2e		       d3		      byte.b	211
+    334  ac2f		       d5		      byte.b	213
+    335  ac30		       d8		      byte.b	216
+    336  ac31		       da		      byte.b	218
+    337  ac32		       dc		      byte.b	220
+    338  ac33		       de		      byte.b	222
+    339  ac34		       e0		      byte.b	224
+    340  ac35		       e2		      byte.b	226
+    341  ac36		       e3		      byte.b	227
+    342  ac37		       e5		      byte.b	229
+    343  ac38		       e6		      byte.b	230
+    344  ac39		       e8		      byte.b	232
+    345  ac3a		       e9		      byte.b	233
+    346  ac3b		       ea		      byte.b	234
+    347  ac3c		       eb		      byte.b	235
+    348  ac3d		       ec		      byte.b	236
+    349  ac3e		       ed		      byte.b	237
+    350  ac3f		       ee		      byte.b	238
+    351  ac40		       00		      byte.b	0
+    352  ac41		       00		      byte.b	0
+    353  ac42		       00		      byte.b	0
+    354  ac43		       00		      byte.b	0
+    355  ac44		       00		      byte.b	0
+    356  ac45		       00		      byte.b	0
+    357  ac46		       00		      byte.b	0
+    358  ac47		       00		      byte.b	0
+    359  ac48		       00		      byte.b	0
+    360  ac49		       00		      byte.b	0
+    361  ac4a		       00		      byte.b	0
+    362  ac4b		       00		      byte.b	0
+    363  ac4c		       00		      byte.b	0
+    364  ac4d		       00		      byte.b	0
+    365  ac4e		       00		      byte.b	0
+    366  ac4f		       00		      byte.b	0
+    367  ac50		       00		      byte.b	0
+    368  ac51		       00		      byte.b	0
+    369  ac52		       00		      byte.b	0
+    370  ac53		       00		      byte.b	0
+    371  ac54		       00		      byte.b	0
+    372  ac55		       00		      byte.b	0
+    373  ac56		       00		      byte.b	0
+    374  ac57		       00		      byte.b	0
+    375  ac58		       00		      byte.b	0
+    376  ac59		       00		      byte.b	0
+    377  ac5a		       00		      byte.b	0
+    378  ac5b		       00		      byte.b	0
+    379  ac5c		       00		      byte.b	0
+    380  ac5d		       00		      byte.b	0
+    381  ac5e		       00		      byte.b	0
+    382  ac5f		       00		      byte.b	0
+    383  ac60		       00		      byte.b	0
+    384  ac61		       00		      byte.b	0
+    385  ac62		       00		      byte.b	0
+    386  ac63		       00		      byte.b	0
+    387  ac64		       00		      byte.b	0
+    388  ac65		       00		      byte.b	0
+    389  ac66		       00		      byte.b	0
+    390  ac67		       00		      byte.b	0
+    391  ac68		       00		      byte.b	0
+    392  ac69		       00		      byte.b	0
+    393  ac6a		       00		      byte.b	0
+    394  ac6b
+    395  ac6b
+    396  ac6b				   voice4lookup_pal
+    397  ac6b		       00		      byte.b	0
+    398  ac6c		       00		      byte.b	0
+    399  ac6d		       00		      byte.b	0
+    400  ac6e		       00		      byte.b	0
+    401  ac6f		       00		      byte.b	0
+    402  ac70		       00		      byte.b	0
+    403  ac71		       00		      byte.b	0
+    404  ac72		       00		      byte.b	0
+    405  ac73		       00		      byte.b	0
+    406  ac74		       00		      byte.b	0
+    407  ac75		       00		      byte.b	0
+    408  ac76		       00		      byte.b	0
+    409  ac77		       00		      byte.b	0
+    410  ac78		       00		      byte.b	0
+    411  ac79		       00		      byte.b	0
+    412  ac7a		       00		      byte.b	0
+    413  ac7b		       00		      byte.b	0
+    414  ac7c		       00		      byte.b	0
+    415  ac7d		       00		      byte.b	0
+    416  ac7e		       00		      byte.b	0
+    417  ac7f		       00		      byte.b	0
+    418  ac80		       00		      byte.b	0
+    419  ac81		       00		      byte.b	0
+    420  ac82		       00		      byte.b	0
+    421  ac83		       00		      byte.b	0
+    422  ac84		       00		      byte.b	0
+    423  ac85		       00		      byte.b	0
+    424  ac86		       00		      byte.b	0
+    425  ac87		       00		      byte.b	0
+    426  ac88		       00		      byte.b	0
+    427  ac89		       00		      byte.b	0
+    428  ac8a		       00		      byte.b	0
+    429  ac8b		       00		      byte.b	0
+    430  ac8c		       00		      byte.b	0
+    431  ac8d		       00		      byte.b	0
+    432  ac8e		       00		      byte.b	0
+    433  ac8f		       85		      byte.b	133	; (122.60)  <- not reachable in PAL
+    434  ac90		       8c		      byte.b	140
+    435  ac91		       92		      byte.b	146
+    436  ac92		       98		      byte.b	152
+    437  ac93		       9e		      byte.b	158
+    438  ac94		       a3		      byte.b	163
+    439  ac95		       a9		      byte.b	169
+    440  ac96		       ad		      byte.b	173
+    441  ac97		       b2		      byte.b	178
+    442  ac98		       b6		      byte.b	182
+    443  ac99		       ba		      byte.b	186
+    444  ac9a		       be		      byte.b	190
+    445  ac9b		       c2		      byte.b	194
+    446  ac9c		       c5		      byte.b	197
+    447  ac9d		       c9		      byte.b	201
+    448  ac9e		       cc		      byte.b	204
+    449  ac9f		       cf		      byte.b	207
+    450  aca0		       d1		      byte.b	209
+    451  aca1		       d4		      byte.b	212
+    452  aca2		       d6		      byte.b	214
+    453  aca3		       d9		      byte.b	217
+    454  aca4		       db		      byte.b	219
+    455  aca5		       dd		      byte.b	221
+    456  aca6		       df		      byte.b	223
+    457  aca7		       e0		      byte.b	224
+    458  aca8		       e2		      byte.b	226
+    459  aca9		       e4		      byte.b	228
+    460  acaa		       e5		      byte.b	229
+    461  acab		       e7		      byte.b	231
+    462  acac		       e8		      byte.b	232
+    463  acad		       e9		      byte.b	233
+    464  acae		       eb		      byte.b	235
+    465  acaf		       ec		      byte.b	236
+    466  acb0		       ed		      byte.b	237
+    467  acb1		       ee		      byte.b	238
+    468  acb2		       ef		      byte.b	239
+    469  acb3		       f0		      byte.b	240
+    470  acb4		       00		      byte.b	0
+    471  acb5		       00		      byte.b	0
+    472  acb6		       00		      byte.b	0
+    473  acb7		       00		      byte.b	0
+    474  acb8		       00		      byte.b	0
+    475  acb9		       00		      byte.b	0
+    476  acba		       00		      byte.b	0
+    477  acbb		       00		      byte.b	0
+    478  acbc		       00		      byte.b	0
+    479  acbd		       00		      byte.b	0
+    480  acbe		       00		      byte.b	0
+    481  acbf		       00		      byte.b	0
+    482  acc0		       00		      byte.b	0
+    483  acc1		       00		      byte.b	0
+    484  acc2		       00		      byte.b	0
+    485  acc3		       00		      byte.b	0
+    486  acc4		       00		      byte.b	0
+    487  acc5		       00		      byte.b	0
+    488  acc6		       00		      byte.b	0
+    489  acc7		       00		      byte.b	0
+    490  acc8		       00		      byte.b	0
+    491  acc9		       00		      byte.b	0
+    492  acca		       00		      byte.b	0
+    493  accb		       00		      byte.b	0
+    494  accc		       00		      byte.b	0
+    495  accd		       00		      byte.b	0
+    496  acce		       00		      byte.b	0
+    497  accf		       00		      byte.b	0
+    498  acd0		       00		      byte.b	0
+    499  acd1		       00		      byte.b	0
+    500  acd2		       00		      byte.b	0
+    501  acd3		       00		      byte.b	0
+    502  acd4		       00		      byte.b	0
+    503  acd5		       00		      byte.b	0
+    504  acd6		       00		      byte.b	0
+    505  acd7		       00		      byte.b	0
+    506  acd8		       00		      byte.b	0
+    507  acd9		       00		      byte.b	0
+    508  acda		       00		      byte.b	0
+    509  acdb		       00		      byte.b	0
+    510  acdc		       00		      byte.b	0
+    511  acdd		       00		      byte.b	0
+    512  acde		       00		      byte.b	0
+    513  acdf		       00		      byte.b	0
+    514  ace0		       00		      byte.b	0
+    515  ace1		       00		      byte.b	0
+    516  ace2		       00		      byte.b	0
+    517  ace3		       00		      byte.b	0
+    518  ace4		       00		      byte.b	0
+    519  ace5		       00		      byte.b	0
+    520  ace6		       00		      byte.b	0
+    521  ace7		       00		      byte.b	0
+    522  ace8		       00		      byte.b	0
+    523  ace9		       00		      byte.b	0
+    524  acea		       00		      byte.b	0
+    525  aceb
+    526  aceb							; EOF!
+------- FILE vicmidi.asm
+------- FILE lookup-alt.asm LEVEL 2 PASS 2
+      0  aceb					      include	"lookup-alt.asm"
+      1  aceb							; --------------------------------------------------------------------------------------------------
+      2  aceb							; Note Lookups Alternate - 128 bytes each, map MIDI Note# to a VIC register value
+      3  aceb							; From http://sleepingelephant.com/ipw-web/bulletin/bb/viewtopic.php?t=3643
+      4  aceb
+      5  aceb				   voice1lookup_alt
+      6  aceb		       00		      byte.b	0
+      7  acec		       00		      byte.b	0
+      8  aced		       00		      byte.b	0
+      9  acee		       00		      byte.b	0
+     10  acef		       00		      byte.b	0
+     11  acf0		       00		      byte.b	0
+     12  acf1		       00		      byte.b	0
+     13  acf2		       00		      byte.b	0
+     14  acf3		       00		      byte.b	0
+     15  acf4		       00		      byte.b	0
+     16  acf5		       00		      byte.b	0
+     17  acf6		       00		      byte.b	0
+     18  acf7		       00		      byte.b	0
+     19  acf8		       00		      byte.b	0
+     20  acf9		       00		      byte.b	0
+     21  acfa		       00		      byte.b	0
+     22  acfb		       00		      byte.b	0
+     23  acfc		       00		      byte.b	0
+     24  acfd		       00		      byte.b	0
+     25  acfe		       00		      byte.b	0
+     26  acff		       00		      byte.b	0
+     27  ad00		       00		      byte.b	0
+     28  ad01		       00		      byte.b	0
+     29  ad02		       00		      byte.b	0
+     30  ad03		       ff		      byte.b	255
+     31  ad04		       86		      byte.b	134
+     32  ad05		       8d		      byte.b	141
+     33  ad06		       93		      byte.b	147
+     34  ad07		       99		      byte.b	153
+     35  ad08		       9f		      byte.b	159
+     36  ad09		       a4		      byte.b	164
+     37  ad0a		       aa		      byte.b	170
+     38  ad0b		       ae		      byte.b	174
+     39  ad0c		       b3		      byte.b	179
+     40  ad0d		       b7		      byte.b	183
+     41  ad0e		       bb		      byte.b	187
+     42  ad0f		       bf		      byte.b	191
+     43  ad10		       c3		      byte.b	195
+     44  ad11		       c6		      byte.b	198
+     45  ad12		       c9		      byte.b	201
+     46  ad13		       cc		      byte.b	204
+     47  ad14		       cf		      byte.b	207
+     48  ad15		       d2		      byte.b	210
+     49  ad16		       d4		      byte.b	212
+     50  ad17		       d7		      byte.b	215
+     51  ad18		       d9		      byte.b	217
+     52  ad19		       db		      byte.b	219
+     53  ad1a		       dd		      byte.b	221
+     54  ad1b		       df		      byte.b	223
+     55  ad1c		       e1		      byte.b	225
+     56  ad1d		       e2		      byte.b	226
+     57  ad1e		       e4		      byte.b	228
+     58  ad1f		       e6		      byte.b	230
+     59  ad20		       e7		      byte.b	231
+     60  ad21		       e8		      byte.b	232
+     61  ad22		       ea		      byte.b	234
+     62  ad23		       eb		      byte.b	235
+     63  ad24		       ec		      byte.b	236
+     64  ad25		       ed		      byte.b	237
+     65  ad26		       ee		      byte.b	238
+     66  ad27		       ef		      byte.b	239
+     67  ad28		       00		      byte.b	0
+     68  ad29		       00		      byte.b	0
+     69  ad2a		       00		      byte.b	0
+     70  ad2b		       00		      byte.b	0
+     71  ad2c		       00		      byte.b	0
+     72  ad2d		       00		      byte.b	0
+     73  ad2e		       00		      byte.b	0
+     74  ad2f		       00		      byte.b	0
+     75  ad30		       00		      byte.b	0
+     76  ad31		       00		      byte.b	0
+     77  ad32		       00		      byte.b	0
+     78  ad33		       00		      byte.b	0
+     79  ad34		       00		      byte.b	0
+     80  ad35		       00		      byte.b	0
+     81  ad36		       00		      byte.b	0
+     82  ad37		       00		      byte.b	0
+     83  ad38		       00		      byte.b	0
+     84  ad39		       00		      byte.b	0
+     85  ad3a		       00		      byte.b	0
+     86  ad3b		       00		      byte.b	0
+     87  ad3c		       00		      byte.b	0
+     88  ad3d		       00		      byte.b	0
+     89  ad3e		       00		      byte.b	0
+     90  ad3f		       00		      byte.b	0
+     91  ad40		       00		      byte.b	0
+     92  ad41		       00		      byte.b	0
+     93  ad42		       00		      byte.b	0
+     94  ad43		       00		      byte.b	0
+     95  ad44		       00		      byte.b	0
+     96  ad45		       00		      byte.b	0
+     97  ad46		       00		      byte.b	0
+     98  ad47		       00		      byte.b	0
+     99  ad48		       00		      byte.b	0
+    100  ad49		       00		      byte.b	0
+    101  ad4a		       00		      byte.b	0
+    102  ad4b		       00		      byte.b	0
+    103  ad4c		       00		      byte.b	0
+    104  ad4d		       00		      byte.b	0
+    105  ad4e		       00		      byte.b	0
+    106  ad4f		       00		      byte.b	0
+    107  ad50		       00		      byte.b	0
+    108  ad51		       00		      byte.b	0
+    109  ad52		       00		      byte.b	0
+    110  ad53		       00		      byte.b	0
+    111  ad54		       00		      byte.b	0
+    112  ad55		       00		      byte.b	0
+    113  ad56		       00		      byte.b	0
+    114  ad57		       00		      byte.b	0
+    115  ad58		       00		      byte.b	0
+    116  ad59		       00		      byte.b	0
+    117  ad5a		       00		      byte.b	0
+    118  ad5b		       00		      byte.b	0
+    119  ad5c		       00		      byte.b	0
+    120  ad5d		       00		      byte.b	0
+    121  ad5e		       00		      byte.b	0
+    122  ad5f		       00		      byte.b	0
+    123  ad60		       00		      byte.b	0
+    124  ad61		       00		      byte.b	0
+    125  ad62		       00		      byte.b	0
+    126  ad63		       00		      byte.b	0
+    127  ad64		       00		      byte.b	0
+    128  ad65		       00		      byte.b	0
+    129  ad66		       00		      byte.b	0
+    130  ad67		       00		      byte.b	0
+    131  ad68		       00		      byte.b	0
+    132  ad69		       00		      byte.b	0
+    133  ad6a		       00		      byte.b	0
+    134  ad6b
+    135  ad6b				   voice2lookup_alt
+    136  ad6b		       00		      byte.b	0
+    137  ad6c		       00		      byte.b	0
+    138  ad6d		       00		      byte.b	0
+    139  ad6e		       00		      byte.b	0
+    140  ad6f		       00		      byte.b	0
+    141  ad70		       00		      byte.b	0
+    142  ad71		       00		      byte.b	0
+    143  ad72		       00		      byte.b	0
+    144  ad73		       00		      byte.b	0
+    145  ad74		       00		      byte.b	0
+    146  ad75		       00		      byte.b	0
+    147  ad76		       00		      byte.b	0
+    148  ad77		       00		      byte.b	0
+    149  ad78		       00		      byte.b	0
+    150  ad79		       00		      byte.b	0
+    151  ad7a		       00		      byte.b	0
+    152  ad7b		       00		      byte.b	0
+    153  ad7c		       00		      byte.b	0
+    154  ad7d		       00		      byte.b	0
+    155  ad7e		       00		      byte.b	0
+    156  ad7f		       00		      byte.b	0
+    157  ad80		       00		      byte.b	0
+    158  ad81		       00		      byte.b	0
+    159  ad82		       00		      byte.b	0
+    160  ad83		       00		      byte.b	0
+    161  ad84		       00		      byte.b	0
+    162  ad85		       00		      byte.b	0
+    163  ad86		       00		      byte.b	0
+    164  ad87		       00		      byte.b	0
+    165  ad88		       00		      byte.b	0
+    166  ad89		       00		      byte.b	0
+    167  ad8a		       00		      byte.b	0
+    168  ad8b		       00		      byte.b	0
+    169  ad8c		       00		      byte.b	0
+    170  ad8d		       00		      byte.b	0
+    171  ad8e		       00		      byte.b	0
+    172  ad8f		       ff		      byte.b	255
+    173  ad90		       86		      byte.b	134
+    174  ad91		       8d		      byte.b	141
+    175  ad92		       93		      byte.b	147
+    176  ad93		       99		      byte.b	153
+    177  ad94		       9f		      byte.b	159
+    178  ad95		       a4		      byte.b	164
+    179  ad96		       aa		      byte.b	170
+    180  ad97		       ae		      byte.b	174
+    181  ad98		       b3		      byte.b	179
+    182  ad99		       b7		      byte.b	183
+    183  ad9a		       bb		      byte.b	187
+    184  ad9b		       bf		      byte.b	191
+    185  ad9c		       c3		      byte.b	195
+    186  ad9d		       c6		      byte.b	198
+    187  ad9e		       c9		      byte.b	201
+    188  ad9f		       cc		      byte.b	204
+    189  ada0		       cf		      byte.b	207
+    190  ada1		       d2		      byte.b	210
+    191  ada2		       d4		      byte.b	212
+    192  ada3		       d7		      byte.b	215
+    193  ada4		       d9		      byte.b	217
+    194  ada5		       db		      byte.b	219
+    195  ada6		       dd		      byte.b	221
+    196  ada7		       df		      byte.b	223
+    197  ada8		       e1		      byte.b	225
+    198  ada9		       e2		      byte.b	226
+    199  adaa		       e4		      byte.b	228
+    200  adab		       e6		      byte.b	230
+    201  adac		       e7		      byte.b	231
+    202  adad		       e8		      byte.b	232
+    203  adae		       ea		      byte.b	234
+    204  adaf		       eb		      byte.b	235
+    205  adb0		       ec		      byte.b	236
+    206  adb1		       ed		      byte.b	237
+    207  adb2		       ee		      byte.b	238
+    208  adb3		       ef		      byte.b	239
+    209  adb4		       00		      byte.b	0
+    210  adb5		       00		      byte.b	0
+    211  adb6		       00		      byte.b	0
+    212  adb7		       00		      byte.b	0
+    213  adb8		       00		      byte.b	0
+    214  adb9		       00		      byte.b	0
+    215  adba		       00		      byte.b	0
+    216  adbb		       00		      byte.b	0
+    217  adbc		       00		      byte.b	0
+    218  adbd		       00		      byte.b	0
+    219  adbe		       00		      byte.b	0
+    220  adbf		       00		      byte.b	0
+    221  adc0		       00		      byte.b	0
+    222  adc1		       00		      byte.b	0
+    223  adc2		       00		      byte.b	0
+    224  adc3		       00		      byte.b	0
+    225  adc4		       00		      byte.b	0
+    226  adc5		       00		      byte.b	0
+    227  adc6		       00		      byte.b	0
+    228  adc7		       00		      byte.b	0
+    229  adc8		       00		      byte.b	0
+    230  adc9		       00		      byte.b	0
+    231  adca		       00		      byte.b	0
+    232  adcb		       00		      byte.b	0
+    233  adcc		       00		      byte.b	0
+    234  adcd		       00		      byte.b	0
+    235  adce		       00		      byte.b	0
+    236  adcf		       00		      byte.b	0
+    237  add0		       00		      byte.b	0
+    238  add1		       00		      byte.b	0
+    239  add2		       00		      byte.b	0
+    240  add3		       00		      byte.b	0
+    241  add4		       00		      byte.b	0
+    242  add5		       00		      byte.b	0
+    243  add6		       00		      byte.b	0
+    244  add7		       00		      byte.b	0
+    245  add8		       00		      byte.b	0
+    246  add9		       00		      byte.b	0
+    247  adda		       00		      byte.b	0
+    248  addb		       00		      byte.b	0
+    249  addc		       00		      byte.b	0
+    250  addd		       00		      byte.b	0
+    251  adde		       00		      byte.b	0
+    252  addf		       00		      byte.b	0
+    253  ade0		       00		      byte.b	0
+    254  ade1		       00		      byte.b	0
+    255  ade2		       00		      byte.b	0
+    256  ade3		       00		      byte.b	0
+    257  ade4		       00		      byte.b	0
+    258  ade5		       00		      byte.b	0
+    259  ade6		       00		      byte.b	0
+    260  ade7		       00		      byte.b	0
+    261  ade8		       00		      byte.b	0
+    262  ade9		       00		      byte.b	0
+    263  adea		       00		      byte.b	0
+    264  adeb
+    265  adeb				   voice3lookup_alt
+    266  adeb		       00		      byte.b	0
+    267  adec		       00		      byte.b	0
+    268  aded		       00		      byte.b	0
+    269  adee		       00		      byte.b	0
+    270  adef		       00		      byte.b	0
+    271  adf0		       00		      byte.b	0
+    272  adf1		       00		      byte.b	0
+    273  adf2		       00		      byte.b	0
+    274  adf3		       00		      byte.b	0
+    275  adf4		       00		      byte.b	0
+    276  adf5		       00		      byte.b	0
+    277  adf6		       00		      byte.b	0
+    278  adf7		       00		      byte.b	0
+    279  adf8		       00		      byte.b	0
+    280  adf9		       00		      byte.b	0
+    281  adfa		       00		      byte.b	0
+    282  adfb		       00		      byte.b	0
+    283  adfc		       00		      byte.b	0
+    284  adfd		       00		      byte.b	0
+    285  adfe		       00		      byte.b	0
+    286  adff		       00		      byte.b	0
+    287  ae00		       00		      byte.b	0
+    288  ae01		       00		      byte.b	0
+    289  ae02		       00		      byte.b	0
+    290  ae03		       00		      byte.b	0
+    291  ae04		       00		      byte.b	0
+    292  ae05		       00		      byte.b	0
+    293  ae06		       00		      byte.b	0
+    294  ae07		       00		      byte.b	0
+    295  ae08		       00		      byte.b	0
+    296  ae09		       00		      byte.b	0
+    297  ae0a		       00		      byte.b	0
+    298  ae0b		       00		      byte.b	0
+    299  ae0c		       00		      byte.b	0
+    300  ae0d		       00		      byte.b	0
+    301  ae0e		       00		      byte.b	0
+    302  ae0f		       00		      byte.b	0
+    303  ae10		       00		      byte.b	0
+    304  ae11		       00		      byte.b	0
+    305  ae12		       00		      byte.b	0
+    306  ae13		       00		      byte.b	0
+    307  ae14		       00		      byte.b	0
+    308  ae15		       00		      byte.b	0
+    309  ae16		       00		      byte.b	0
+    310  ae17		       00		      byte.b	0
+    311  ae18		       00		      byte.b	0
+    312  ae19		       00		      byte.b	0
+    313  ae1a		       00		      byte.b	0
+    314  ae1b		       ff		      byte.b	255
+    315  ae1c		       86		      byte.b	134
+    316  ae1d		       8d		      byte.b	141
+    317  ae1e		       93		      byte.b	147
+    318  ae1f		       99		      byte.b	153
+    319  ae20		       9f		      byte.b	159
+    320  ae21		       a4		      byte.b	164
+    321  ae22		       aa		      byte.b	170
+    322  ae23		       ae		      byte.b	174
+    323  ae24		       b3		      byte.b	179
+    324  ae25		       b7		      byte.b	183
+    325  ae26		       bb		      byte.b	187
+    326  ae27		       bf		      byte.b	191
+    327  ae28		       c3		      byte.b	195
+    328  ae29		       c6		      byte.b	198
+    329  ae2a		       c9		      byte.b	201
+    330  ae2b		       cc		      byte.b	204
+    331  ae2c		       cf		      byte.b	207
+    332  ae2d		       d2		      byte.b	210
+    333  ae2e		       d4		      byte.b	212
+    334  ae2f		       d7		      byte.b	215
+    335  ae30		       d9		      byte.b	217
+    336  ae31		       db		      byte.b	219
+    337  ae32		       dd		      byte.b	221
+    338  ae33		       df		      byte.b	223
+    339  ae34		       e1		      byte.b	225
+    340  ae35		       e2		      byte.b	226
+    341  ae36		       e4		      byte.b	228
+    342  ae37		       e6		      byte.b	230
+    343  ae38		       e7		      byte.b	231
+    344  ae39		       e8		      byte.b	232
+    345  ae3a		       ea		      byte.b	234
+    346  ae3b		       eb		      byte.b	235
+    347  ae3c		       ec		      byte.b	236
+    348  ae3d		       ed		      byte.b	237
+    349  ae3e		       ee		      byte.b	238
+    350  ae3f		       ef		      byte.b	239
+    351  ae40		       00		      byte.b	0
+    352  ae41		       00		      byte.b	0
+    353  ae42		       00		      byte.b	0
+    354  ae43		       00		      byte.b	0
+    355  ae44		       00		      byte.b	0
+    356  ae45		       00		      byte.b	0
+    357  ae46		       00		      byte.b	0
+    358  ae47		       00		      byte.b	0
+    359  ae48		       00		      byte.b	0
+    360  ae49		       00		      byte.b	0
+    361  ae4a		       00		      byte.b	0
+    362  ae4b		       00		      byte.b	0
+    363  ae4c		       00		      byte.b	0
+    364  ae4d		       00		      byte.b	0
+    365  ae4e		       00		      byte.b	0
+    366  ae4f		       00		      byte.b	0
+    367  ae50		       00		      byte.b	0
+    368  ae51		       00		      byte.b	0
+    369  ae52		       00		      byte.b	0
+    370  ae53		       00		      byte.b	0
+    371  ae54		       00		      byte.b	0
+    372  ae55		       00		      byte.b	0
+    373  ae56		       00		      byte.b	0
+    374  ae57		       00		      byte.b	0
+    375  ae58		       00		      byte.b	0
+    376  ae59		       00		      byte.b	0
+    377  ae5a		       00		      byte.b	0
+    378  ae5b		       00		      byte.b	0
+    379  ae5c		       00		      byte.b	0
+    380  ae5d		       00		      byte.b	0
+    381  ae5e		       00		      byte.b	0
+    382  ae5f		       00		      byte.b	0
+    383  ae60		       00		      byte.b	0
+    384  ae61		       00		      byte.b	0
+    385  ae62		       00		      byte.b	0
+    386  ae63		       00		      byte.b	0
+    387  ae64		       00		      byte.b	0
+    388  ae65		       00		      byte.b	0
+    389  ae66		       00		      byte.b	0
+    390  ae67		       00		      byte.b	0
+    391  ae68		       00		      byte.b	0
+    392  ae69		       00		      byte.b	0
+    393  ae6a		       00		      byte.b	0
+    394  ae6b
+    395  ae6b
+    396  ae6b				   voice4lookup_alt
+    397  ae6b		       00		      byte.b	0
+    398  ae6c		       00		      byte.b	0
+    399  ae6d		       00		      byte.b	0
+    400  ae6e		       00		      byte.b	0
+    401  ae6f		       00		      byte.b	0
+    402  ae70		       00		      byte.b	0
+    403  ae71		       00		      byte.b	0
+    404  ae72		       00		      byte.b	0
+    405  ae73		       00		      byte.b	0
+    406  ae74		       00		      byte.b	0
+    407  ae75		       00		      byte.b	0
+    408  ae76		       00		      byte.b	0
+    409  ae77		       00		      byte.b	0
+    410  ae78		       00		      byte.b	0
+    411  ae79		       00		      byte.b	0
+    412  ae7a		       00		      byte.b	0
+    413  ae7b		       00		      byte.b	0
+    414  ae7c		       00		      byte.b	0
+    415  ae7d		       00		      byte.b	0
+    416  ae7e		       00		      byte.b	0
+    417  ae7f		       00		      byte.b	0
+    418  ae80		       00		      byte.b	0
+    419  ae81		       00		      byte.b	0
+    420  ae82		       00		      byte.b	0
+    421  ae83		       00		      byte.b	0
+    422  ae84		       00		      byte.b	0
+    423  ae85		       00		      byte.b	0
+    424  ae86		       00		      byte.b	0
+    425  ae87		       00		      byte.b	0
+    426  ae88		       00		      byte.b	0
+    427  ae89		       00		      byte.b	0
+    428  ae8a		       00		      byte.b	0
+    429  ae8b		       00		      byte.b	0
+    430  ae8c		       00		      byte.b	0
+    431  ae8d		       00		      byte.b	0
+    432  ae8e		       00		      byte.b	0
+    433  ae8f		       ff		      byte.b	255
+    434  ae90		       86		      byte.b	134
+    435  ae91		       8d		      byte.b	141
+    436  ae92		       93		      byte.b	147
+    437  ae93		       99		      byte.b	153
+    438  ae94		       9f		      byte.b	159
+    439  ae95		       a4		      byte.b	164
+    440  ae96		       aa		      byte.b	170
+    441  ae97		       ae		      byte.b	174
+    442  ae98		       b3		      byte.b	179
+    443  ae99		       b7		      byte.b	183
+    444  ae9a		       bb		      byte.b	187
+    445  ae9b		       bf		      byte.b	191
+    446  ae9c		       c3		      byte.b	195
+    447  ae9d		       c6		      byte.b	198
+    448  ae9e		       c9		      byte.b	201
+    449  ae9f		       cc		      byte.b	204
+    450  aea0		       cf		      byte.b	207
+    451  aea1		       d2		      byte.b	210
+    452  aea2		       d4		      byte.b	212
+    453  aea3		       d7		      byte.b	215
+    454  aea4		       d9		      byte.b	217
+    455  aea5		       db		      byte.b	219
+    456  aea6		       dd		      byte.b	221
+    457  aea7		       df		      byte.b	223
+    458  aea8		       e1		      byte.b	225
+    459  aea9		       e2		      byte.b	226
+    460  aeaa		       e4		      byte.b	228
+    461  aeab		       e6		      byte.b	230
+    462  aeac		       e7		      byte.b	231
+    463  aead		       e8		      byte.b	232
+    464  aeae		       ea		      byte.b	234
+    465  aeaf		       eb		      byte.b	235
+    466  aeb0		       ec		      byte.b	236
+    467  aeb1		       ed		      byte.b	237
+    468  aeb2		       ee		      byte.b	238
+    469  aeb3		       ef		      byte.b	239
+    470  aeb4		       00		      byte.b	0
+    471  aeb5		       00		      byte.b	0
+    472  aeb6		       00		      byte.b	0
+    473  aeb7		       00		      byte.b	0
+    474  aeb8		       00		      byte.b	0
+    475  aeb9		       00		      byte.b	0
+    476  aeba		       00		      byte.b	0
+    477  aebb		       00		      byte.b	0
+    478  aebc		       00		      byte.b	0
+    479  aebd		       00		      byte.b	0
+    480  aebe		       00		      byte.b	0
+    481  aebf		       00		      byte.b	0
+    482  aec0		       00		      byte.b	0
+    483  aec1		       00		      byte.b	0
+    484  aec2		       00		      byte.b	0
+    485  aec3		       00		      byte.b	0
+    486  aec4		       00		      byte.b	0
+    487  aec5		       00		      byte.b	0
+    488  aec6		       00		      byte.b	0
+    489  aec7		       00		      byte.b	0
+    490  aec8		       00		      byte.b	0
+    491  aec9		       00		      byte.b	0
+    492  aeca		       00		      byte.b	0
+    493  aecb		       00		      byte.b	0
+    494  aecc		       00		      byte.b	0
+    495  aecd		       00		      byte.b	0
+    496  aece		       00		      byte.b	0
+    497  aecf		       00		      byte.b	0
+    498  aed0		       00		      byte.b	0
+    499  aed1		       00		      byte.b	0
+    500  aed2		       00		      byte.b	0
+    501  aed3		       00		      byte.b	0
+    502  aed4		       00		      byte.b	0
+    503  aed5		       00		      byte.b	0
+    504  aed6		       00		      byte.b	0
+    505  aed7		       00		      byte.b	0
+    506  aed8		       00		      byte.b	0
+    507  aed9		       00		      byte.b	0
+    508  aeda		       00		      byte.b	0
+    509  aedb		       00		      byte.b	0
+    510  aedc		       00		      byte.b	0
+    511  aedd		       00		      byte.b	0
+    512  aede		       00		      byte.b	0
+    513  aedf		       00		      byte.b	0
+    514  aee0		       00		      byte.b	0
+    515  aee1		       00		      byte.b	0
+    516  aee2		       00		      byte.b	0
+    517  aee3		       00		      byte.b	0
+    518  aee4		       00		      byte.b	0
+    519  aee5		       00		      byte.b	0
+    520  aee6		       00		      byte.b	0
+    521  aee7		       00		      byte.b	0
+    522  aee8		       00		      byte.b	0
+    523  aee9		       00		      byte.b	0
+    524  aeea		       00		      byte.b	0
+    525  aeeb
+    526  aeeb							; EOF!
+------- FILE vicmidi.asm
+    830  aeeb
+    831  aeeb							; ----------------------------------------------------------------------------
+    832  aeeb							; Binary includes
+    833  aeeb
+    834  aeeb				   fontorg
+    835  aeeb					      incbin	"font.bin"
+    836  b2eb
+    837  b2eb							; EOF!

@@ -67,11 +67,18 @@ resetuart:
 setupirq:
   sei 
   
+ ifnconst USE_NMI
   ; Point to my interrupt vector
   lda #<theirq 
   sta $0314 
   lda #>theirq 
   sta $0315 
+ else
+  lda #<thenmi
+  sta $0318
+  lda #>thenmi
+  sta $0319
+ eif
   
   ; Disable timer interrupts
   
@@ -85,6 +92,15 @@ setupirq:
 
 ; ----------------------------------------------------------------------------
 ; The IRQ.  
+
+thenmi:
+ ifconst USE_NMI
+  pha
+  txa
+  pha
+  tya
+  pha
+ eif
 
 theirq: 
   ; Fetch the received byte

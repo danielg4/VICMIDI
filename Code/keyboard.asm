@@ -122,6 +122,8 @@ ReadKey:
     lda #$00
     sta midinoteout   
     
+    dec screen_colors
+
 key_x:
     rts
     
@@ -136,8 +138,11 @@ keypressed:   ; A contains key code
     beq key_x    ; Yes, do nothing
     
     ; New note - send it     
+
     sta midinoteout
     jsr sendnoteon    
+
+    inc screen_colors
 
     rts
     
